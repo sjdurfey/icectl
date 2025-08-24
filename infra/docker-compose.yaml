@@ -110,6 +110,32 @@ services:
     networks:
       - iceberg-net
 
+  # Data seeder running inside Docker network
+  seeder:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        WORKDIR /app
+        COPY ./pyproject.toml ./uv.lock ./
+        COPY ./src ./src
+        COPY ./infra/seeder.py ./seeder.py
+        RUN pip install uv && uv sync --frozen
+        CMD ["uv", "run", "python", "seeder.py"]
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    environment:
+      LAKEKEEPER_URI: http://lakekeeper:8181/catalog/
+      WAREHOUSE: s3://warehouse/
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+      AWS_REGION: us-east-1
+    networks:
+      - iceberg-net
+    profiles:
+      - seed
+
 volumes:
   lakekeeper-pg:
   minio_data:

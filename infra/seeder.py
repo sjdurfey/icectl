@@ -118,12 +118,17 @@ def main() -> int:
     print("Loading catalog...")
     try:
         # Override S3 configuration to use localhost when running locally
+        # Force all S3 operations to use our endpoint configuration
         s3_config = {
             "s3.endpoint": s3_endpoint,
             "s3.path-style-access": True,
+            "s3.force-virtual-addressing": False,  # Use path-style addressing 
             "s3.region": region,
             "s3.access-key-id": access_key,
             "s3.secret-access-key": secret_key,
+            "py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO",
+            "s3.connect-timeout": 10,  # Faster timeout for debugging
+            "s3.request-timeout": 30,
         }
         
         cat = load_catalog(
