@@ -131,3 +131,131 @@ def list_tables_metadata(cat: Catalog, namespace: str) -> List[Dict[str, Any]]:
 
     results.sort(key=lambda r: r["name"])  # stable order
     return results
+
+
+def get_table_schema(cat: Catalog, table_name: str) -> Dict[str, Any]:
+    """Get table schema information including columns and types."""
+    from pyiceberg.catalog import load_catalog  # local import for tests
+    
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    
+    table = ice_catalog.load_table(table_name)
+    schema = table.schema()
+    
+    columns = []
+    for field in schema.fields:
+        columns.append({
+            "id": field.field_id,
+            "name": field.name,
+            "type": str(field.field_type),
+            "optional": not field.required,
+            "comment": getattr(field, "doc", None),
+        })
+    
+    return {
+        "table": table_name,
+        "schema_id": schema.schema_id,
+        "columns": columns,
+    }
+
+
+def sample_table_data(cat: Catalog, table_name: str, limit: int = 10) -> Dict[str, Any]:
+    """Sample data from a table."""
+    from pyiceberg.catalog import load_catalog  # local import for tests
+    
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    
+    table = ice_catalog.load_table(table_name)
+    
+    # Get column names from schema
+    schema = table.schema()
+    column_names = [field.name for field in schema.fields]
+    
+    # Scan table data with limit
+    try:
+        scan = table.scan().limit(limit)
+        arrow_table = scan.to_arrow()
+        
+        # Convert to list of lists for display
+        rows = []
+        for i in range(len(arrow_table)):
+            row = []
+            for col_name in column_names:
+                value = arrow_table[col_name][i].as_py()
+                row.append(value)
+            rows.append(row)
+            
+        return {
+            "table": table_name,
+            "columns": column_names,
+            "rows": rows,
+            "limit": limit,
+        }
+        
+    except Exception as e:
+        # If scan fails, return empty result
+        return {
+            "table": table_name,
+            "columns": column_names,
+            "rows": [],
+            "limit": limit,
+            "error": str(e),
+        }
+
+
+def describe_table(cat: Catalog, table_name: str) -> Dict[str, Any]:
+    """Get detailed table metadata and properties."""
+    from datetime import datetime, timezone
+    from pyiceberg.catalog import load_catalog  # local import for tests
+    
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    
+    table = ice_catalog.load_table(table_name)
+    metadata = table.metadata
+    
+    # Get current snapshot info
+    current_snapshot_id = getattr(metadata, "current_snapshot_id", None)
+    current_snapshot = None
+    if current_snapshot_id:
+        for snapshot in getattr(metadata, "snapshots", []):
+            if getattr(snapshot, "snapshot_id", None) == current_snapshot_id:
+                current_snapshot = snapshot
+                break
+    
+    # Build result
+    result = {
+        "table": table_name,
+        "location": getattr(metadata, "location", None),
+        "schema_id": getattr(table.schema(), "schema_id", None),
+        "current_snapshot_id": str(current_snapshot_id) if current_snapshot_id else None,
+        "column_count": len(table.schema().fields),
+        "partition_spec_id": getattr(metadata, "default_spec_id", None),
+    }
+    
+    if current_snapshot:
+        ts_ms = getattr(current_snapshot, "timestamp_ms", None)
+        if ts_ms:
+            result["last_updated"] = (
+                datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        
+        summary = getattr(current_snapshot, "summary", {}) or {}
+        if isinstance(summary, dict):
+            result["operation"] = summary.get("operation")
+            if "total-records" in summary:
+                try:
+                    result["total_records"] = int(summary["total-records"])
+                except (ValueError, TypeError):
+                    pass
+    
+    # Add table properties if available
+    properties = getattr(metadata, "properties", {}) or {}
+    if properties:
+        result["properties"] = properties
+        
+    return result

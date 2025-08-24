@@ -285,3 +285,176 @@ def tables_list(ctx: click.Context, catalog_name: Optional[str], namespace: str)
             headers=["TABLE", "LAST_COMMIT_TS", "LAST_SNAPSHOT_ID", "TOTAL_RECORDS"],
         )
     )
+
+
+@tables.command("schema")
+@click.argument("table_name")
+@click.option("--catalog", "catalog_name", help="Catalog name; uses default if omitted")
+@click.pass_context
+def table_schema(ctx: click.Context, table_name: str, catalog_name: Optional[str]) -> None:
+    """Show table schema and columns."""
+    log = logging.getLogger("icectl.table")
+    try:
+        log.info("Loading config...")
+        cfg = load_config()
+        log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
+    except ConfigError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2)
+
+    name = catalog_name or cfg.default_catalog
+    if not name:
+        click.echo("No catalog specified and no default_catalog set in config", err=True)
+        raise SystemExit(2)
+
+    cat = cfg.catalogs.get(name)
+    if not cat:
+        click.echo(f"Catalog not found: {name}", err=True)
+        raise SystemExit(2)
+
+    try:
+        log.info("Getting schema for table '%s' in catalog '%s'", table_name, name)
+        schema_info = clients.get_table_schema(cat, table_name)
+        log.info("Found schema with %d columns", len(schema_info))
+    except Exception as e:
+        click.echo(f"Failed to get table schema: {e}", err=True)
+        raise SystemExit(2)
+
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(schema_info, indent=2, sort_keys=True))
+        return
+
+    if not schema_info.get("columns"):
+        click.echo("No columns found")
+        return
+
+    rows = []
+    for col in schema_info["columns"]:
+        rows.append([
+            col.get("name", ""),
+            col.get("type", ""),
+            "optional" if col.get("optional", True) else "required",
+            col.get("comment", "—"),
+        ])
+    
+    log.info("Rendering schema for table '%s'", table_name)
+    click.echo(tabulate(rows, headers=["COLUMN", "TYPE", "NULLABLE", "COMMENT"]))
+
+
+@tables.command("sample")
+@click.argument("table_name")
+@click.option("--catalog", "catalog_name", help="Catalog name; uses default if omitted")
+@click.option("-n", "--limit", default=10, help="Number of rows to sample (default: 10)")
+@click.option("--max-col-width", default=80, help="Max column width for display (default: 80)")
+@click.option("--no-truncate", is_flag=True, help="Don't truncate long column values")
+@click.pass_context
+def table_sample(
+    ctx: click.Context,
+    table_name: str, 
+    catalog_name: Optional[str],
+    limit: int,
+    max_col_width: int,
+    no_truncate: bool
+) -> None:
+    """Sample data from a table."""
+    log = logging.getLogger("icectl.table")
+    try:
+        log.info("Loading config...")
+        cfg = load_config()
+        log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
+    except ConfigError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2)
+
+    name = catalog_name or cfg.default_catalog
+    if not name:
+        click.echo("No catalog specified and no default_catalog set in config", err=True)
+        raise SystemExit(2)
+
+    cat = cfg.catalogs.get(name)
+    if not cat:
+        click.echo(f"Catalog not found: {name}", err=True)
+        raise SystemExit(2)
+
+    try:
+        log.info("Sampling %d rows from table '%s' in catalog '%s'", limit, table_name, name)
+        sample_data = clients.sample_table_data(cat, table_name, limit)
+        log.info("Retrieved %d sample rows", len(sample_data.get("rows", [])))
+    except Exception as e:
+        click.echo(f"Failed to sample table: {e}", err=True)
+        raise SystemExit(2)
+
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(sample_data, indent=2, sort_keys=True))
+        return
+
+    rows = sample_data.get("rows", [])
+    if not rows:
+        click.echo("No data found")
+        return
+
+    # Truncate column values if needed
+    if not no_truncate and max_col_width > 0:
+        truncated_rows = []
+        for row in rows:
+            truncated_row = []
+            for cell in row:
+                cell_str = str(cell) if cell is not None else ""
+                if len(cell_str) > max_col_width:
+                    cell_str = cell_str[:max_col_width-3] + "..."
+                truncated_row.append(cell_str)
+            truncated_rows.append(truncated_row)
+        rows = truncated_rows
+
+    headers = sample_data.get("columns", [])
+    log.info("Rendering %d sample rows", len(rows))
+    click.echo(tabulate(rows, headers=headers))
+
+
+@tables.command("describe")  
+@click.argument("table_name")
+@click.option("--catalog", "catalog_name", help="Catalog name; uses default if omitted")
+@click.pass_context
+def table_describe(ctx: click.Context, table_name: str, catalog_name: Optional[str]) -> None:
+    """Show detailed table metadata and properties."""
+    log = logging.getLogger("icectl.table")
+    try:
+        log.info("Loading config...")
+        cfg = load_config()
+        log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
+    except ConfigError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2)
+
+    name = catalog_name or cfg.default_catalog
+    if not name:
+        click.echo("No catalog specified and no default_catalog set in config", err=True)
+        raise SystemExit(2)
+
+    cat = cfg.catalogs.get(name)
+    if not cat:
+        click.echo(f"Catalog not found: {name}", err=True)
+        raise SystemExit(2)
+
+    try:
+        log.info("Describing table '%s' in catalog '%s'", table_name, name)
+        table_info = clients.describe_table(cat, table_name)
+        log.info("Retrieved table metadata")
+    except Exception as e:
+        click.echo(f"Failed to describe table: {e}", err=True)
+        raise SystemExit(2)
+
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(table_info, indent=2, sort_keys=True))
+        return
+
+    # Display table information as key-value pairs
+    rows = []
+    for key, value in table_info.items():
+        if isinstance(value, (dict, list)):
+            # Skip complex objects for table view
+            continue
+        rows.append([key, str(value) if value is not None else "—"])
+    
+    log.info("Rendering table description")
+    click.echo(tabulate(rows, headers=["PROPERTY", "VALUE"]))
