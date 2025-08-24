@@ -175,7 +175,7 @@ def sample_table_data(cat: Catalog, table_name: str, limit: int = 10) -> Dict[st
     
     # Scan table data with limit
     try:
-        scan = table.scan().limit(limit)
+        scan = table.scan(limit=limit)
         arrow_table = scan.to_arrow()
         
         # Convert to list of lists for display

@@ -1,35 +1,41 @@
-version: '3.9'
-
 services:
   # MinIO object store for the Iceberg warehouse
   minio:
-    image: quay.io/minio/minio:latest
+    image: minio/minio:latest
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address :9001
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+      MINIO_DOMAIN: minio
+    command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"  # S3 API
-      - "9001:9001"  # Console
+      - "9000:9000" # S3 API
+      - "9001:9001" # Console
+    volumes:
+      - minio_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
-      interval: 2s
-      timeout: 10s
-      retries: 5
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - iceberg-net
 
   # Create the warehouse bucket using MinIO Client (one-shot)
   minio-init:
-    image: quay.io/minio/mc:latest
+    image: minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && \
-      mc mb -p local/warehouse || true
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set minio http://minio:9000 admin password;
+      /usr/bin/mc mb minio/warehouse --ignore-existing;
+      /usr/bin/mc anonymous set download minio/warehouse;
+      /usr/bin/mc mb minio/warehouse/lakekeeper --ignore-existing;
+      exit 0;
+      "
+    networks:
+      - iceberg-net
 
   # Postgres backing store for Lakekeeper
   db:
@@ -45,30 +51,53 @@ services:
       start_period: 5s
     volumes:
       - lakekeeper-pg:/var/lib/postgresql/data
+    networks:
+      - iceberg-net
 
   # Run DB migrations for Lakekeeper
   lakekeeper-migrate:
     image: quay.io/lakekeeper/catalog:latest-main
     pull_policy: always
-    environment: &lk_env
-      - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
-      - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@db:5432/postgres
-      - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@db:5432/postgres
-      - LAKEKEEPER__AUTHZ_BACKEND=allowall
+    environment:
+      LAKEKEEPER__PG_ENCRYPTION_KEY: This-is-NOT-Secure!
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://postgres:postgres@db:5432/postgres
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://postgres:postgres@db:5432/postgres
+      LAKEKEEPER__AUTHZ_BACKEND: allowall
     restart: "no"
     command: ["migrate"]
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - iceberg-net
 
   # Lakekeeper REST catalog
   lakekeeper:
     image: quay.io/lakekeeper/catalog:latest-main
     pull_policy: always
-    environment: *lk_env
+    environment:
+      LAKEKEEPER__PG_ENCRYPTION_KEY: This-is-NOT-Secure!
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://postgres:postgres@db:5432/postgres
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://postgres:postgres@db:5432/postgres
+      LAKEKEEPER__AUTHZ_BACKEND: allowall
+      LAKEKEEPER__ENABLE_AWS_SYSTEM_CREDENTIALS: "true"
+      LAKEKEEPER__S3_ENABLE_DIRECT_SYSTEM_CREDENTIALS: "true"
+      LAKEKEEPER__S3_REQUIRE_EXTERNAL_ID_FOR_SYSTEM_CREDENTIALS: "false"
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_REGION: us-east-1
+      # MinIO test configuration variables
+      LAKEKEEPER_TEST__S3_BUCKET: warehouse
+      LAKEKEEPER_TEST__S3_REGION: us-east-1
+      LAKEKEEPER_TEST__S3_ACCESS_KEY: admin
+      LAKEKEEPER_TEST__S3_SECRET_KEY: password
+      LAKEKEEPER_TEST__S3_ENDPOINT: http://minio:9000
     command: ["serve"]
     depends_on:
       lakekeeper-migrate:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
     ports:
       - "8181:8181"
@@ -77,25 +106,14 @@ services:
       interval: 2s
       timeout: 10s
       retries: 5
-      start_period: 5s
-
-  # Seeder: creates namespaces (and later tables) through PyIceberg REST
-  seeder:
-    build:
-      context: ..
-      dockerfile: infra/seeder.Dockerfile
-    environment:
-      # Lakekeeper REST endpoint and MinIO credentials
-      LAKEKEEPER_URI: http://lakekeeper:8181/catalog/
-      WAREHOUSE: s3://warehouse/
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-      AWS_REGION: us-east-1
-    depends_on:
-      lakekeeper:
-        condition: service_healthy
-    profiles: ["seed"]
+      start_period: 10s
+    networks:
+      - iceberg-net
 
 volumes:
   lakekeeper-pg:
+  minio_data:
 
+networks:
+  iceberg-net:
+    driver: bridge

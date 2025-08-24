@@ -5,7 +5,7 @@ catalogs:
   prod:
     type: rest
     uri: http://localhost:8181/catalog/
-    warehouse: 0198dd96-5051-7fa1-8ac1-0ad9f06de396/prod
+    warehouse: 00000000-0000-0000-0000-000000000000/prod
     fs:
       endpoint_url: http://localhost:9000
       region: us-east-1
@@ -15,6 +15,6 @@ catalogs:
       s3.endpoint: http://localhost:9000
       s3.path-style-access: true
       s3.region: us-east-1
-      s3.access-key-id: minioadmin
-      s3.secret-access-key: minioadmin
+      s3.access-key-id: admin
+      s3.secret-access-key: password
 
