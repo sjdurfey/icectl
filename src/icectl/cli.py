@@ -9,6 +9,7 @@ from tabulate import tabulate
 
 from icelib.config import ConfigError, load_config
 import icelib.clients as clients
+from icelib.errors import format_error_message, format_config_error, suggest_troubleshooting_steps
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -63,7 +64,7 @@ def catalogs_list(ctx: click.Context) -> None:
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     rows = []
@@ -106,7 +107,7 @@ def catalogs_show(ctx: click.Context, catalog_name: Optional[str]) -> None:
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     name = catalog_name or cfg.default_catalog
@@ -181,7 +182,7 @@ def db_list(ctx: click.Context, catalog_name: Optional[str]) -> None:
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     name = catalog_name or cfg.default_catalog
@@ -199,7 +200,14 @@ def db_list(ctx: click.Context, catalog_name: Optional[str]) -> None:
         namespaces = clients.list_namespaces(cat)
         log.info("Found %d namespaces", len(namespaces))
     except Exception as e:  # surface helpful error without stack
-        click.echo(f"Failed to list namespaces: {e}", err=True)
+        error_msg = format_error_message("list namespaces", e, {"catalog": name})
+        click.echo(error_msg, err=True)
+        if ctx.obj.get("verbose"):
+            suggestions = suggest_troubleshooting_steps("list namespaces", e)
+            if suggestions:
+                click.echo("\nTroubleshooting suggestions:", err=True)
+                for suggestion in suggestions[:3]:  # Show top 3 suggestions
+                    click.echo(f"  • {suggestion}", err=True)
         raise SystemExit(2)
 
     if ctx.obj.get("json"):
@@ -238,7 +246,7 @@ def tables_list(ctx: click.Context, catalog_name: Optional[str], namespace: str)
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     name = catalog_name or cfg.default_catalog
@@ -256,7 +264,14 @@ def tables_list(ctx: click.Context, catalog_name: Optional[str], namespace: str)
         items = clients.list_tables_metadata(cat, namespace)
         log.info("Found %d tables", len(items))
     except Exception as e:  # surface helpful error without stack
-        click.echo(f"Failed to list tables: {e}", err=True)
+        error_msg = format_error_message("list tables", e, {"namespace": namespace, "catalog": name})
+        click.echo(error_msg, err=True)
+        if ctx.obj.get("verbose"):
+            suggestions = suggest_troubleshooting_steps("list tables", e)
+            if suggestions:
+                click.echo("\nTroubleshooting suggestions:", err=True)
+                for suggestion in suggestions[:3]:  # Show top 3 suggestions
+                    click.echo(f"  • {suggestion}", err=True)
         raise SystemExit(2)
 
     if ctx.obj.get("json"):
@@ -299,7 +314,7 @@ def table_schema(ctx: click.Context, table_name: str, catalog_name: Optional[str
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     name = catalog_name or cfg.default_catalog
@@ -317,7 +332,14 @@ def table_schema(ctx: click.Context, table_name: str, catalog_name: Optional[str
         schema_info = clients.get_table_schema(cat, table_name)
         log.info("Found schema with %d columns", len(schema_info))
     except Exception as e:
-        click.echo(f"Failed to get table schema: {e}", err=True)
+        error_msg = format_error_message("get table schema", e, {"table": table_name, "catalog": name})
+        click.echo(error_msg, err=True)
+        if ctx.obj.get("verbose"):
+            suggestions = suggest_troubleshooting_steps("get table schema", e)
+            if suggestions:
+                click.echo("\nTroubleshooting suggestions:", err=True)
+                for suggestion in suggestions[:3]:  # Show top 3 suggestions
+                    click.echo(f"  • {suggestion}", err=True)
         raise SystemExit(2)
 
     if ctx.obj.get("json"):
@@ -363,7 +385,7 @@ def table_sample(
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     name = catalog_name or cfg.default_catalog
@@ -381,7 +403,14 @@ def table_sample(
         sample_data = clients.sample_table_data(cat, table_name, limit)
         log.info("Retrieved %d sample rows", len(sample_data.get("rows", [])))
     except Exception as e:
-        click.echo(f"Failed to sample table: {e}", err=True)
+        error_msg = format_error_message("sample table data", e, {"table": table_name, "catalog": name})
+        click.echo(error_msg, err=True)
+        if ctx.obj.get("verbose"):
+            suggestions = suggest_troubleshooting_steps("sample table data", e)
+            if suggestions:
+                click.echo("\nTroubleshooting suggestions:", err=True)
+                for suggestion in suggestions[:3]:  # Show top 3 suggestions
+                    click.echo(f"  • {suggestion}", err=True)
         raise SystemExit(2)
 
     if ctx.obj.get("json"):
@@ -423,7 +452,7 @@ def table_describe(ctx: click.Context, table_name: str, catalog_name: Optional[s
         cfg = load_config()
         log.info("Loaded config from %s", getattr(cfg, "source_path", "<unknown>"))
     except ConfigError as e:
-        click.echo(str(e), err=True)
+        click.echo(format_config_error(e), err=True)
         raise SystemExit(2)
 
     name = catalog_name or cfg.default_catalog
@@ -441,7 +470,14 @@ def table_describe(ctx: click.Context, table_name: str, catalog_name: Optional[s
         table_info = clients.describe_table(cat, table_name)
         log.info("Retrieved table metadata")
     except Exception as e:
-        click.echo(f"Failed to describe table: {e}", err=True)
+        error_msg = format_error_message("describe table", e, {"table": table_name, "catalog": name})
+        click.echo(error_msg, err=True)
+        if ctx.obj.get("verbose"):
+            suggestions = suggest_troubleshooting_steps("describe table", e)
+            if suggestions:
+                click.echo("\nTroubleshooting suggestions:", err=True)
+                for suggestion in suggestions[:3]:  # Show top 3 suggestions
+                    click.echo(f"  • {suggestion}", err=True)
         raise SystemExit(2)
 
     if ctx.obj.get("json"):

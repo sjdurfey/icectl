@@ -195,8 +195,8 @@ def test_tables_schema_missing_table(tmp_path, monkeypatch):
         runner = CliRunner()
         res = runner.invoke(cli, ["tables", "schema", "nonexistent_table"])
         assert res.exit_code == 2
-        assert "Failed to get table schema" in res.output
-        assert "Table not found" in res.output
+        assert "Table 'nonexistent_table' not found" in res.output
+        assert "icectl tables list" in res.output
 
 
 def test_tables_sample_missing_table(tmp_path, monkeypatch):
@@ -209,8 +209,8 @@ def test_tables_sample_missing_table(tmp_path, monkeypatch):
         runner = CliRunner()
         res = runner.invoke(cli, ["tables", "sample", "nonexistent_table"])
         assert res.exit_code == 2
-        assert "Failed to sample table" in res.output
-        assert "Table not found" in res.output
+        assert "Table 'nonexistent_table' not found" in res.output
+        assert "icectl tables list" in res.output
 
 
 def test_tables_describe_missing_table(tmp_path, monkeypatch):
@@ -223,5 +223,19 @@ def test_tables_describe_missing_table(tmp_path, monkeypatch):
         runner = CliRunner()
         res = runner.invoke(cli, ["tables", "describe", "nonexistent_table"])
         assert res.exit_code == 2
-        assert "Failed to describe table" in res.output
-        assert "Table not found" in res.output
+        assert "Table 'nonexistent_table' not found" in res.output
+        assert "icectl tables list" in res.output
+
+
+def test_error_handling_with_verbose_suggestions(tmp_path, monkeypatch):
+    """Test that verbose mode shows troubleshooting suggestions."""
+    cfg = write_config(tmp_path)
+    monkeypatch.setenv("ICECTL_CONFIG", str(cfg))
+    
+    # Mock exception
+    with patch('icelib.clients.get_table_schema', side_effect=Exception("Table not found")):
+        runner = CliRunner()
+        res = runner.invoke(cli, ["-v", "tables", "schema", "nonexistent_table"])
+        assert res.exit_code == 2
+        assert "Troubleshooting suggestions:" in res.output
+        assert "List available tables:" in res.output
