@@ -39,12 +39,29 @@ A fast, no-frills CLI for navigating Apache Iceberg catalogs. Output is plain an
 
 6. **Run commands**
    ```sh
+   # List available catalogs
    icectl catalogs list
+   
+   # Show catalog details
+   icectl catalogs show --catalog prod
+   
+   # List namespaces/databases
    icectl db list --catalog prod
+   
+   # List tables in a namespace
    icectl tables list --catalog prod --db analytics
-   icectl table schema analytics.events --catalog prod
-   icectl table sample analytics.events --catalog prod -n 5
-   icectl table describe analytics.events --catalog prod
+   
+   # Show table schema
+   icectl tables schema analytics.events --catalog prod
+   
+   # Sample table data
+   icectl tables sample analytics.events --catalog prod -n 5
+   
+   # Show detailed table metadata
+   icectl tables describe analytics.events --catalog prod
+   
+   # JSON output for any command
+   icectl --json-output tables list --db analytics
    ```
 
 ---
@@ -121,22 +138,62 @@ Use `make` for repeatable workflows. These targets assume `uv` and Docker are av
 
 ---
 
-## CLI Surfaces
+## CLI Commands
 
-- `catalogs list`, `catalogs show`
-- `db list`
-- `tables list`
-- `table schema`
-- `table sample`
-- `table describe`
+### Catalog Commands
+- `icectl catalogs list` — List all configured catalogs
+- `icectl catalogs show [--catalog NAME]` — Show catalog details (uses default if not specified)
 
-**Conventions**
-- Plain table output via `tabulate`.
-- JSON output is **always pretty-printed**.
-- Types are printed **exactly** as defined in Iceberg (no remapping).
-- Snapshot IDs are **never truncated**.
-- Nested columns use dot paths (`attrs.ip`).
-- Per-cell truncation defaults to 80 chars in table output (`--max-col-width 80`, `--no-truncate` to disable).
+### Database/Namespace Commands  
+- `icectl db list [--catalog NAME]` — List databases/namespaces in a catalog
+
+### Table Commands
+- `icectl tables list --db NAMESPACE [--catalog NAME]` — List tables with metadata
+- `icectl tables schema TABLE_NAME [--catalog NAME]` — Show table schema and columns
+- `icectl tables sample TABLE_NAME [--catalog NAME] [-n COUNT]` — Sample table data
+- `icectl tables describe TABLE_NAME [--catalog NAME]` — Show detailed table metadata
+
+### Global Options
+- `--json-output` — Output JSON instead of tables (always pretty-printed)
+- `-v, --verbose` — Enable verbose logging and show troubleshooting suggestions on errors
+- `-h, --help` — Show help
+
+### Usage Examples
+
+**Basic Navigation:**
+```sh
+# Explore the data warehouse
+icectl catalogs list
+icectl db list
+icectl tables list --db analytics
+
+# Examine a specific table
+icectl tables schema analytics.events  
+icectl tables sample analytics.events -n 10
+icectl tables describe analytics.events
+```
+
+**JSON Output for Scripting:**
+```sh
+# Get machine-readable output
+icectl --json-output catalogs list
+icectl --json-output tables schema analytics.events | jq '.columns[].name'
+icectl --json-output tables describe analytics.events | jq '.location'
+```
+
+**Error Troubleshooting:**
+```sh
+# Use verbose mode for detailed error help
+icectl -v tables schema nonexistent.table
+# Shows error context and specific troubleshooting suggestions
+```
+
+**Output Conventions**
+- Plain table output via `tabulate`
+- JSON output is always pretty-printed and sorted
+- Iceberg types are printed exactly as defined (no remapping)
+- Snapshot IDs are never truncated
+- Per-cell truncation defaults to 80 chars (`--max-col-width`, `--no-truncate` to disable)
 
 ---
 
@@ -153,10 +210,54 @@ When/if published to a registry, `uvx icectl` will work without cloning.
 
 ## Troubleshooting
 
-- **Auth to MinIO/AWS**: ensure your env has the right credentials (`MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, or `AWS_PROFILE` / `AWS_*` env vars).
-- **Config not found**: set `ICECTL_CONFIG=/full/path/config.yaml`.
-- **Compose not healthy**: `make infra-logs` and inspect services.
-- **Pre-commit blocking**: run `make fmt && make lint` to fix formatting/lint issues.
+### Common Issues
+
+**Configuration Problems:**
+- **Config not found**: Set `ICECTL_CONFIG=/full/path/config.yaml` or create `~/.config/icectl/config.yaml`
+- **Wrong warehouse format**: Use project-id/warehouse-name format for Lakekeeper (e.g., `abc123.../prod`)
+- **Catalog not found**: Check catalog name spelling in your config file
+
+**Connection Issues:**
+- **Services not running**: Run `make infra-up` or `make infra-reset` to start Docker services
+- **Connection timeout**: Check that services are healthy with `docker-compose ps` and `make infra-logs`
+- **Port conflicts**: Ensure ports 8181 (Lakekeeper) and 9000 (MinIO) are available
+
+**Authentication Issues:**
+- **MinIO credentials**: Check `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` or hardcode in config
+- **AWS credentials**: Ensure `AWS_PROFILE` or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are set
+- **S3 permissions**: Verify your credentials have access to the warehouse bucket
+
+**Data Issues:**
+- **Table not found**: Use `icectl tables list --db <namespace>` to see available tables
+- **Empty results**: Run `make infra-seed` to populate sample data
+- **Schema errors**: Table may have incompatible Iceberg schema
+
+### Getting Help
+
+1. **Use verbose mode** for detailed error messages:
+   ```sh
+   icectl -v tables schema analytics.events
+   ```
+
+2. **Check service health**:
+   ```sh
+   make infra-logs                    # View service logs
+   curl http://localhost:8181/health  # Check Lakekeeper
+   docker-compose ps                  # Check container status
+   ```
+
+3. **Validate configuration**:
+   ```sh
+   icectl catalogs list              # Test basic config
+   icectl catalogs show              # Show detailed catalog config
+   ```
+
+4. **Reset everything**:
+   ```sh
+   make infra-reset                  # Reset Docker services and data
+   ```
+
+The CLI provides context-aware error messages with specific suggestions when run with `-v/--verbose` flag.
 
 ---
 
