@@ -18,6 +18,8 @@ class BaseListScreen(Screen):
         Binding("escape", "go_back", "Back", priority=True),
         Binding("enter", "select_item", "Select", priority=True),
         ("q", "quit", "Quit"),
+        ("/", "focus_search", "Search"),
+        ("s", "focus_search", "Search"),
     ]
     
     class ItemSelected(Message):
@@ -51,8 +53,8 @@ class BaseListScreen(Screen):
         self.data_table = self.query_one("#data-table", FilterableDataTable)
         self.search_input = self.query_one("#search-input", SearchInput)
         
-        # Focus search input by default
-        self.search_input.focus()
+        # Focus data table by default for navigation
+        self.data_table.focus()
         
         # Load initial data
         self.load_data()
@@ -77,6 +79,11 @@ class BaseListScreen(Screen):
         """Quit the application."""
         self.app.exit()
     
+    def action_focus_search(self) -> None:
+        """Focus the search input."""
+        if self.search_input:
+            self.search_input.focus()
+    
     def load_data(self) -> None:
         """Load data for this screen. Override in subclasses."""
         raise NotImplementedError("Subclasses must implement load_data()")
@@ -88,20 +95,29 @@ class BaseListScreen(Screen):
             
     def on_key(self, event) -> None:
         """Handle key events."""
-        # If search input is focused, let it handle typing
+        # If search input is focused, let it handle everything except Escape
         if self.search_input and self.search_input.has_focus:
+            if event.key == "escape":
+                # Escape from search input goes back to table
+                self.data_table.focus()
+                event.prevent_default()
             return
             
-        # If it's a regular character, focus search and pass the key
-        if event.character and event.character.isprintable():
-            self.search_input.focus()
-            # Let the search input handle the character
-            return
-            
-        # Handle arrow keys for table navigation
-        if event.key == "down":
-            if self.data_table:
-                self.data_table.focus()
-        elif event.key == "up": 
-            if self.data_table:
-                self.data_table.focus()
+        # If data table is focused, handle special keys
+        if self.data_table and self.data_table.has_focus:
+            # Forward slash or 's' to focus search
+            if event.key == "/" or event.key == "s":
+                self.search_input.focus()
+                event.prevent_default()
+                return
+            # Regular printable characters also focus search (except single letters that might be shortcuts)
+            elif event.character and event.character.isprintable() and len(event.character) == 1:
+                # Don't steal single letter shortcuts like 'q', but do steal typing
+                if not event.character.isalpha() or event.character.isdigit():
+                    self.search_input.focus()
+                    # Pass the character to search input
+                    return
+        
+        # If neither is focused, default to table
+        if self.data_table and not self.data_table.has_focus and not (self.search_input and self.search_input.has_focus):
+            self.data_table.focus()

@@ -261,6 +261,20 @@ The CLI provides context-aware error messages with specific suggestions when run
 
 ---
 
-## Roadmap
+## TUI (Text User Interface)
 
-After the CLI MVP, we’ll spec a TUI that calls the same `icelib` APIs, keeping all business logic shared.
+An interactive terminal-based interface for exploring Iceberg catalogs is planned. See [tui_design.md](tui_design.md) for detailed design specifications.
+
+**Launch TUI:**
+```sh
+icectl tui
+```
+
+**Key TUI Features:**
+- **Vim-style navigation**: `:table events`, `:catalog prod`, `:database analytics`
+- **Real-time search**: Type to filter catalogs/databases/tables by name
+- **Context-aware refresh**: `:r` refreshes current scope (catalogs/databases/tables)
+- **Interactive exploration**: Navigate with arrow keys, mouse support
+- **Error resilience**: Graceful error handling, never crashes
+
+The TUI reuses the same `icelib` core library as the CLI, ensuring consistent behavior and shared business logic.

@@ -11,6 +11,9 @@ from icelib.config import load_config
 from .command_parser import CommandParser, CommandType
 from .models.navigation_state import NavigationState
 from .screens.catalog_screen import CatalogScreen
+from .screens.database_screen import DatabaseScreen
+from .screens.table_screen import TableScreen
+from .screens.table_detail_screen import TableDetailScreen
 from .screens.base_screen import BaseListScreen
 
 
@@ -95,12 +98,41 @@ class TUIApp(App):
         logger.info(f"Item selected: {message.item_data}")
         
         # Handle catalog selection - navigate to databases/namespaces
-        if '_catalog_name' in message.item_data:
+        if '_catalog_name' in message.item_data and '_namespace' not in message.item_data:
             catalog_name = message.item_data['_catalog_name']
-            self.navigation_state.current_catalog = catalog_name
+            self.navigation_state.set_catalog(catalog_name)
             logger.info(f"Selected catalog: {catalog_name}")
-            # TODO: Navigate to database list screen
-            self.show_notification(f"Selected catalog: {catalog_name}")
+            
+            # Navigate to database list screen
+            database_screen = DatabaseScreen(catalog_name)
+            self.push_screen(database_screen)
+            self.show_notification(f"Loading databases for catalog: {catalog_name}")
+            
+        # Handle namespace selection - navigate to tables  
+        elif '_namespace' in message.item_data and '_table_name' not in message.item_data:
+            namespace = message.item_data['_namespace']
+            catalog_name = message.item_data.get('_catalog_name', self.navigation_state.catalog)
+            self.navigation_state.set_database(namespace)
+            logger.info(f"Selected namespace: {namespace} in catalog: {catalog_name}")
+            
+            # Navigate to table list screen
+            table_screen = TableScreen(catalog_name, namespace)
+            self.push_screen(table_screen)
+            self.show_notification(f"Loading tables for namespace: {namespace}")
+            
+        # Handle table selection - navigate to table details
+        elif '_table_name' in message.item_data:
+            table_name = message.item_data['_table_name']
+            namespace = message.item_data.get('_namespace', self.navigation_state.database)
+            catalog_name = message.item_data.get('_catalog_name', self.navigation_state.catalog)
+            self.navigation_state.set_table(table_name)
+            logger.info(f"Selected table: {table_name} in {catalog_name}.{namespace}")
+            
+            # Navigate to table details screen
+            table_detail_screen = TableDetailScreen(catalog_name, namespace, table_name)
+            self.push_screen(table_detail_screen)
+            self.show_notification(f"Loading details for table: {table_name}")
+            
         else:
             # For other selections, just show the data
             self.show_notification(f"Selected: {message.item_data.get('NAME', 'Unknown')}")
@@ -108,6 +140,11 @@ class TUIApp(App):
     def on_base_list_screen_go_back(self, message: BaseListScreen.GoBack) -> None:
         """Handle go back from list screens."""
         logger.info("Going back")
+        self.pop_screen()
+    
+    def on_table_detail_screen_go_back(self, message: TableDetailScreen.GoBack) -> None:
+        """Handle go back from table detail screen."""
+        logger.info("Going back from table details")
         self.pop_screen()
 
 

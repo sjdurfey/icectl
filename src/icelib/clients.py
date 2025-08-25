@@ -268,3 +268,124 @@ def describe_table(cat: Catalog, table_name: str) -> Dict[str, Any]:
         result["properties"] = properties
         
     return result
+
+
+def get_table_snapshots(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:
+    """Get snapshot history for a table."""
+    from datetime import datetime, timezone
+    from pyiceberg.catalog import load_catalog
+    
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    
+    table = ice_catalog.load_table(table_name)
+    metadata = table.metadata
+    
+    snapshots = []
+    for snapshot in getattr(metadata, "snapshots", []):
+        snapshot_id = getattr(snapshot, "snapshot_id", None)
+        parent_id = getattr(snapshot, "parent_snapshot_id", None)
+        ts_ms = getattr(snapshot, "timestamp_ms", None)
+        summary = getattr(snapshot, "summary", {}) or {}
+        
+        # Format timestamp
+        timestamp_str = None
+        if ts_ms:
+            timestamp_str = (
+                datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        
+        # Get operation from summary
+        operation = summary.get("operation", "unknown")
+        total_records = summary.get("total-records", "—")
+        added_files = summary.get("added-files-size", "—")
+        deleted_files = summary.get("removed-files-size", "—")
+        
+        snapshots.append({
+            "snapshot_id": str(snapshot_id) if snapshot_id else "—",
+            "parent_id": str(parent_id) if parent_id else "—",
+            "timestamp": timestamp_str or "—",
+            "operation": operation,
+            "total_records": total_records,
+            "added_files_size": added_files,
+            "deleted_files_size": deleted_files,
+            "is_current": snapshot_id == getattr(metadata, "current_snapshot_id", None)
+        })
+    
+    # Sort by timestamp (newest first)
+    snapshots.sort(key=lambda s: s["timestamp"], reverse=True)
+    return snapshots
+
+
+def get_table_branches(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:
+    """Get branch information for a table."""
+    from pyiceberg.catalog import load_catalog
+    
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    
+    table = ice_catalog.load_table(table_name)
+    metadata = table.metadata
+    
+    branches = []
+    refs = getattr(metadata, "refs", {})
+    
+    for ref_name, ref_info in refs.items():
+        ref_type = getattr(ref_info, "type", "unknown")
+        if ref_type == "branch":
+            snapshot_id = getattr(ref_info, "snapshot_id", None)
+            
+            # Find the snapshot details
+            snapshot = None
+            for s in getattr(metadata, "snapshots", []):
+                if getattr(s, "snapshot_id", None) == snapshot_id:
+                    snapshot = s
+                    break
+            
+            # Get parent snapshot ID from the snapshot
+            parent_id = None
+            operation = "unknown"
+            if snapshot:
+                parent_id = getattr(snapshot, "parent_snapshot_id", None)
+                summary = getattr(snapshot, "summary", {}) or {}
+                operation = summary.get("operation", "unknown")
+            
+            branches.append({
+                "name": ref_name,
+                "snapshot_id": str(snapshot_id) if snapshot_id else "—",
+                "parent_ref": str(parent_id) if parent_id else "—",
+                "action": operation,
+                "type": ref_type,
+                "is_current": ref_name == "main"  # Assume main is current
+            })
+    
+    # If no explicit branches found, check for main branch
+    if not branches:
+        current_snapshot_id = getattr(metadata, "current_snapshot_id", None)
+        if current_snapshot_id:
+            # Find the current snapshot
+            current_snapshot = None
+            for s in getattr(metadata, "snapshots", []):
+                if getattr(s, "snapshot_id", None) == current_snapshot_id:
+                    current_snapshot = s
+                    break
+            
+            parent_id = None
+            operation = "unknown"
+            if current_snapshot:
+                parent_id = getattr(current_snapshot, "parent_snapshot_id", None)
+                summary = getattr(current_snapshot, "summary", {}) or {}
+                operation = summary.get("operation", "unknown")
+            
+            branches.append({
+                "name": "main",
+                "snapshot_id": str(current_snapshot_id),
+                "parent_ref": str(parent_id) if parent_id else "—",
+                "action": operation,
+                "type": "branch", 
+                "is_current": True
+            })
+    
+    return branches
