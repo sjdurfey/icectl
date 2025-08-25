@@ -205,6 +205,15 @@ def sample_table_data(cat: Catalog, table_name: str, limit: int = 10) -> Dict[st
         }
 
 
+def get_catalogs_client(config: Any) -> Any:
+    """Create a catalogs client from config.
+    
+    For now, this is a simple passthrough that returns the config object.
+    The TUI will use the config directly to access catalog information.
+    """
+    return config
+
+
 def describe_table(cat: Catalog, table_name: str) -> Dict[str, Any]:
     """Get detailed table metadata and properties."""
     from datetime import datetime, timezone

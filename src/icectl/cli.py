@@ -494,3 +494,19 @@ def table_describe(ctx: click.Context, table_name: str, catalog_name: Optional[s
     
     log.info("Rendering table description")
     click.echo(tabulate(rows, headers=["PROPERTY", "VALUE"]))
+
+
+@cli.command()
+@click.pass_context
+def tui(ctx: click.Context) -> None:
+    """Launch interactive TUI for catalog exploration."""
+    try:
+        from icetui.app import run_tui
+        run_tui()
+    except ImportError as e:
+        click.echo(f"TUI dependencies not available: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        error_msg = format_error_message("launch TUI", e, {})
+        click.echo(error_msg, err=True)
+        raise SystemExit(1)
