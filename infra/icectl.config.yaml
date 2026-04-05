@@ -4,17 +4,18 @@ default_catalog: prod
 catalogs:
   prod:
     type: rest
-    uri: http://localhost:8181/catalog/
-    warehouse: 00000000-0000-0000-0000-000000000000/prod
+    uri: https://lakekeeper.homelab/catalog/
+    warehouse: 00000000-0000-0000-0000-000000000000/warehouse
     fs:
-      endpoint_url: http://localhost:9000
+      endpoint_url: http://rustfs.homelab:9090
       region: us-east-1
       profile: null
     sample_engine: { type: local }
     overrides:
-      s3.endpoint: http://localhost:9000
+      s3.endpoint: http://rustfs.homelab:9090
       s3.path-style-access: true
       s3.region: us-east-1
-      s3.access-key-id: admin
-      s3.secret-access-key: password
-
+      s3.access-key-id: rustfsadmin
+      s3.secret-access-key: rustfsadmin123
+      rest.ssl-verification: false
+      ssl.verify: false

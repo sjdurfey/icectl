@@ -14,7 +14,9 @@ echo "Writing integration run to: $LOG_FILE"
 
 # Ensure config is set (default to provided sample)
 export ICECTL_CONFIG="${ICECTL_CONFIG:-$ROOT_DIR/infra/icectl.config.yaml}"
+export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-/Users/stephen/Development/git/sjdurfey/homelab/configs/ssl/ca/ca.crt}"
 echo "ICECTL_CONFIG=$ICECTL_CONFIG" | tee -a "$LOG_FILE"
+echo "REQUESTS_CA_BUNDLE=$REQUESTS_CA_BUNDLE" | tee -a "$LOG_FILE"
 
 # Quick readiness loop: try 'catalogs list' until success or timeout
 echo "Waiting for Lakekeeper to be ready..." | tee -a "$LOG_FILE"

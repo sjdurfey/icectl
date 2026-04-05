@@ -1,6 +1,6 @@
 PY = uv run
 
-.PHONY: deps hook fmt lint test itest check check-all build install uninstall dist-clean run icectl infra-up infra-down infra-logs infra-seed infra-reset itest-run
+.PHONY: deps hook fmt lint test itest check check-all build install uninstall dist-clean run tui infra-up infra-down infra-logs infra-seed infra-reset itest-run
 
 deps:
 	uv sync
@@ -37,8 +37,11 @@ dist-clean:
 	rm -rf dist/
 
 # Dev execution
-run icectl:
-	$(PY) icectl $(ARGS)
+run:
+	ICECTL_CONFIG=infra/icectl.config.yaml REQUESTS_CA_BUNDLE=/Users/stephen/Development/git/sjdurfey/homelab/configs/ssl/ca/ca.crt $(PY) icectl $(ARGS)
+
+tui:
+	ICECTL_CONFIG=infra/icectl.config.yaml REQUESTS_CA_BUNDLE=/Users/stephen/Development/git/sjdurfey/homelab/configs/ssl/ca/ca.crt $(PY) icectl tui
 
 # Docker Compose infra (MinIO + Lakekeeper + Seeder)
 COMPOSE = docker-compose -f infra/docker-compose.yaml

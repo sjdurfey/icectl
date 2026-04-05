@@ -331,61 +331,63 @@ def get_table_branches(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:
     
     branches = []
     refs = getattr(metadata, "refs", {})
+    current_snapshot_id = getattr(metadata, "current_snapshot_id", None)
     
+    # Process all refs (branches and tags)
     for ref_name, ref_info in refs.items():
         ref_type = getattr(ref_info, "type", "unknown")
-        if ref_type == "branch":
-            snapshot_id = getattr(ref_info, "snapshot_id", None)
-            
-            # Find the snapshot details
-            snapshot = None
-            for s in getattr(metadata, "snapshots", []):
-                if getattr(s, "snapshot_id", None) == snapshot_id:
-                    snapshot = s
-                    break
-            
-            # Get parent snapshot ID from the snapshot
-            parent_id = None
-            operation = "unknown"
-            if snapshot:
-                parent_id = getattr(snapshot, "parent_snapshot_id", None)
-                summary = getattr(snapshot, "summary", {}) or {}
-                operation = summary.get("operation", "unknown")
-            
-            branches.append({
-                "name": ref_name,
-                "snapshot_id": str(snapshot_id) if snapshot_id else "—",
-                "parent_ref": str(parent_id) if parent_id else "—",
-                "action": operation,
-                "type": ref_type,
-                "is_current": ref_name == "main"  # Assume main is current
-            })
+        snapshot_id = getattr(ref_info, "snapshot_id", None)
+        
+        # Find the snapshot details
+        snapshot = None
+        for s in getattr(metadata, "snapshots", []):
+            if getattr(s, "snapshot_id", None) == snapshot_id:
+                snapshot = s
+                break
+        
+        # Get parent snapshot ID from the snapshot
+        parent_id = None
+        operation = "unknown"
+        if snapshot:
+            parent_id = getattr(snapshot, "parent_snapshot_id", None)
+            summary = getattr(snapshot, "summary", {}) or {}
+            operation = summary.get("operation", "unknown")
+        
+        branches.append({
+            "name": ref_name,
+            "snapshot_id": str(snapshot_id) if snapshot_id else "—",
+            "parent_ref": str(parent_id) if parent_id else "—",
+            "action": operation,
+            "type": ref_type,
+            "is_current": snapshot_id == current_snapshot_id
+        })
     
-    # If no explicit branches found, check for main branch
-    if not branches:
-        current_snapshot_id = getattr(metadata, "current_snapshot_id", None)
-        if current_snapshot_id:
-            # Find the current snapshot
-            current_snapshot = None
-            for s in getattr(metadata, "snapshots", []):
-                if getattr(s, "snapshot_id", None) == current_snapshot_id:
-                    current_snapshot = s
-                    break
-            
-            parent_id = None
-            operation = "unknown"
-            if current_snapshot:
-                parent_id = getattr(current_snapshot, "parent_snapshot_id", None)
-                summary = getattr(current_snapshot, "summary", {}) or {}
-                operation = summary.get("operation", "unknown")
-            
-            branches.append({
-                "name": "main",
-                "snapshot_id": str(current_snapshot_id),
-                "parent_ref": str(parent_id) if parent_id else "—",
-                "action": operation,
-                "type": "branch", 
-                "is_current": True
-            })
+    # If no refs found, create a main branch from current snapshot
+    if not branches and current_snapshot_id:
+        # Find the current snapshot
+        current_snapshot = None
+        for s in getattr(metadata, "snapshots", []):
+            if getattr(s, "snapshot_id", None) == current_snapshot_id:
+                current_snapshot = s
+                break
+        
+        parent_id = None
+        operation = "unknown"
+        if current_snapshot:
+            parent_id = getattr(current_snapshot, "parent_snapshot_id", None)
+            summary = getattr(current_snapshot, "summary", {}) or {}
+            operation = summary.get("operation", "unknown")
+        
+        branches.append({
+            "name": "main",
+            "snapshot_id": str(current_snapshot_id),
+            "parent_ref": str(parent_id) if parent_id else "—",
+            "action": operation,
+            "type": "branch", 
+            "is_current": True
+        })
+    
+    # Sort branches with current first, then alphabetically
+    branches.sort(key=lambda b: (not b["is_current"], b["name"]))
     
     return branches
