@@ -5,7 +5,8 @@
 #     "pyiceberg>=0.9.1",
 #     "pyarrow>=21.0.0",
 #     "requests>=2.25.0",
-#     "pyyaml>=6.0"
+#     "pyyaml>=6.0",
+#     "s3fs>=2024.1.0"
 # ]
 # ///
 
@@ -24,6 +25,7 @@ import json
 import logging
 import random
 from datetime import datetime, timedelta, date
+from decimal import Decimal
 from typing import Dict, List, Any, Optional
 
 import requests
@@ -111,8 +113,8 @@ def create_catalog():
             f"s3.access-key-id": env["access_key"],
             f"s3.secret-access-key": env["secret_key"],
             f"py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO",
-            f"s3.connect-timeout": "10s",
-            f"s3.request-timeout": "30s",
+            f"s3.connect-timeout": 10,
+            f"s3.request-timeout": 30,
             f"rest.ssl-verification": False
         }
     )
@@ -572,7 +574,7 @@ def create_and_populate_players_tables(catalog):
         pa.array([b[9] for b in batting_data]),  # home_runs
         pa.array([b[10] for b in batting_data]), # rbis
         pa.array([b[11] for b in batting_data]), # stolen_bases
-        pa.array([pa.scalar(b[12]).as_py() for b in batting_data], type=pa.decimal128(5, 3)), # avg
+        pa.array([Decimal(str(round(b[12], 3))) for b in batting_data], type=pa.decimal128(5, 3)), # avg
     ]
 
     batting_pa_table = pa.Table.from_arrays(batting_arrays, schema=pa_batting_schema)
@@ -677,7 +679,7 @@ def create_and_populate_analytics_tables(catalog):
         pa.array([m[2] for m in metrics_data]),  # game_id
         pa.array([m[3] for m in metrics_data]),  # timestamp
         pa.array([m[4] for m in metrics_data]),  # metric_type
-        pa.array([pa.scalar(m[5]).as_py() for m in metrics_data], type=pa.decimal128(10, 2)),  # value
+        pa.array([Decimal(str(round(m[5], 2))) for m in metrics_data], type=pa.decimal128(10, 2)),  # value
         pa.array([m[6] for m in metrics_data]),  # unit
     ]
 
