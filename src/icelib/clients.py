@@ -435,7 +435,8 @@ def get_table_branches(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:
     
     # Process all refs (branches and tags)
     for ref_name, ref_info in refs.items():
-        ref_type = getattr(ref_info, "type", "unknown")
+        ref_type_enum = getattr(ref_info, "snapshot_ref_type", None)
+        ref_type = ref_type_enum.value if ref_type_enum is not None else "branch"
         snapshot_id = getattr(ref_info, "snapshot_id", None)
         
         # Find the snapshot details

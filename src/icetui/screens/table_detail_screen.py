@@ -440,6 +440,30 @@ class TableDetailScreen(Screen):
                 parent_row = row_index_map.get(pid, 0)
                 lane_active_until[lane] = max(lane_active_until.get(lane, -1), parent_row - 1)
 
+        # Precompute first/last display row for each lane, and the parent lane of each
+        # lane's last node (for diagonal connectors).
+        lane_first_row: Dict[int, int] = {}
+        lane_last_row: Dict[int, int] = {}
+        lane_last_sid: Dict[int, str] = {}
+        for row_i, snap in enumerate(snapshots):
+            sid = snap.get("snapshot_id", "")
+            lane = snap_lane.get(sid, 0)
+            if lane not in lane_first_row:
+                lane_first_row[lane] = row_i
+            lane_last_row[lane] = row_i
+            lane_last_sid[lane] = sid
+
+        lane_last_parent_lane: Dict[int, int] = {}
+        sid_to_parent: Dict[str, str] = {
+            s.get("snapshot_id", ""): s.get("parent_id", "—") for s in snapshots
+        }
+        for lj, last_sid in lane_last_sid.items():
+            pid = sid_to_parent.get(last_sid, "—")
+            if pid and pid != "—" and pid in snap_lane:
+                p_lane = snap_lane[pid]
+                if p_lane != lj:
+                    lane_last_parent_lane[lj] = p_lane
+
         # Render: one node row + one connector row per snapshot (except last)
         result = Text()
         for row_i, snap in enumerate(snapshots):
@@ -462,7 +486,8 @@ class TableDetailScreen(Screen):
             for li in range(num_lanes):
                 if li == lane:
                     line.append(node_char, style=node_style)
-                elif li in lane_active_until and lane_active_until[li] >= row_i:
+                elif (li in lane_active_until and lane_active_until[li] >= row_i
+                      and lane_first_row.get(li, row_i) < row_i):
                     line.append("|", style="dim white")
                 else:
                     line.append(" ")
@@ -477,23 +502,35 @@ class TableDetailScreen(Screen):
                     if i:
                         line.append(" ", style="default")
                     line.append(f"[{name}]", style=label_style)
-            else:
-                short_id = sid[-10:] if len(sid) >= 10 else sid
-                line.append(f"  {short_id}", style=node_style)
+            # unlabeled intermediate nodes: no label
 
             result.append_text(line)
 
-            # Connector row (pipes only) between nodes
+            # Connector row between nodes (pipes + diagonals for forks/merges)
             if row_i < len(snapshots) - 1:
                 result.append("\n")
+                # Lanes whose first node is on the *next* row are represented by \ in
+                # the gap — suppress their | so we get |\ instead of |\|.
+                suppressed = {
+                    li + 1
+                    for li in range(num_lanes - 1)
+                    if lane_first_row.get(li + 1) == row_i + 1
+                }
                 connector = Text()
                 for li in range(num_lanes):
-                    if li in lane_active_until and lane_active_until[li] >= row_i:
+                    if li not in suppressed and li in lane_active_until and lane_active_until[li] >= row_i:
                         connector.append("|", style="dim white")
                     else:
                         connector.append(" ")
                     if li < num_lanes - 1:
-                        connector.append(" ")
+                        next_lane = li + 1
+                        if lane_first_row.get(next_lane) == row_i + 1:
+                            connector.append("\\", style="dim white")
+                        elif (lane_last_row.get(next_lane) == row_i and
+                              lane_last_parent_lane.get(next_lane, next_lane) < next_lane):
+                            connector.append("/", style="dim white")
+                        else:
+                            connector.append(" ")
                 result.append_text(connector)
                 result.append("\n")
 
