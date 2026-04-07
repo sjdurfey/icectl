@@ -67,14 +67,14 @@ class TableDetailScreen(Screen):
                     yield FilterableDataTable(id="properties-table")
 
                 with TabPane("Snapshots", id="snapshots"):
-                    with Horizontal(id="snapshots-split"):
-                        with Vertical(id="snapshots-list-pane"):
-                            yield FilterableDataTable(id="snapshots-table")
-                        with VerticalScroll(id="snapshots-graph-pane"):
-                            yield Static("", id="snapshot-dag", markup=False)
+                    yield FilterableDataTable(id="snapshots-table")
 
                 with TabPane("Branches", id="branches"):
-                    yield FilterableDataTable(id="branches-table")
+                    with Horizontal(id="branches-split"):
+                        with Vertical(id="branches-list-pane"):
+                            yield FilterableDataTable(id="branches-table")
+                        with VerticalScroll(id="branches-graph-pane"):
+                            yield Static("", id="snapshot-dag", markup=False)
             
             yield Footer()
     
@@ -733,17 +733,17 @@ class TableDetailScreen(Screen):
             logger.info(f"Loading branches for table '{self.full_table_name}'")
             branches = clients.get_table_branches(catalog_config, self.full_table_name)
             
-            columns = ["NAME", "SNAPSHOT_ID", "PARENT_REF", "ACTION", "TYPE", "IS_CURRENT"]
+            columns = ["NAME", "TYPE", "SNAPSHOT_ID", "IS_CURRENT"]
             rows = []
-            
+
             for branch in branches:
+                sid = branch.get("snapshot_id", "—")
                 rows.append({
                     "NAME": branch.get("name", "—"),
-                    "SNAPSHOT_ID": branch.get("snapshot_id", "—"),
-                    "PARENT_REF": branch.get("parent_ref", "—"),
-                    "ACTION": branch.get("action", "—"),
                     "TYPE": branch.get("type", "—"),
-                    "IS_CURRENT": "Yes" if branch.get("is_current", False) else "No"
+                    "SNAPSHOT_ID": sid,
+                    "IS_CURRENT": "Yes" if branch.get("is_current", False) else "No",
+                    "_snapshot_id": sid,
                 })
             
             logger.info(f"Loaded {len(rows)} branches")
@@ -757,15 +757,18 @@ class TableDetailScreen(Screen):
     
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Handle row highlight events across all tables."""
-        # Snapshot list: update graph highlight + parent row in table
+        # Branches list: highlight corresponding node in the DAG graph
+        if event.data_table is self.branches_table:
+            rows = self.branches_table._filtered_rows
+            row_index = event.cursor_row
+            selected_sid = rows[row_index].get("_snapshot_id") if rows and row_index < len(rows) else None
+            self._render_snapshot_graph(selected_snapshot_id=selected_sid)
+            return
+
+        # Snapshots list: highlight parent row in table
         if event.data_table is self.snapshots_table:
             rows = self.snapshots_table._filtered_rows
             row_index = event.cursor_row
-            selected_sid = None
-            if rows and row_index < len(rows):
-                selected_sid = rows[row_index].get("_snapshot_id")
-            self._render_snapshot_graph(selected_snapshot_id=selected_sid)
-
             parent_id = rows[row_index].get("PARENT_ID", "—") if rows and row_index < len(rows) else "—"
             if parent_id != "—":
                 parent_indices = {

@@ -843,7 +843,36 @@ def create_and_populate_standings_table(catalog):
     table.append(to_pa_table(data_2024, include_games_back=True, include_wild_card_rank=True))
     logger.info(f"Wrote {len(data_2024)} rows under schema_2 / spec_2 (league + season + games_back)")
 
-    logger.info(f"Populated analytics.standings with {len(standings_data)} records across 2 partition specs")
+    # Refresh to get the full snapshot history
+    table.refresh()
+    snapshots = sorted(table.metadata.snapshots, key=lambda s: s.timestamp_ms)
+    # snapshots[0] = first write (2022, schema_0/spec_0)
+    # snapshots[1] = spec evolution (no data)  or 2023 write — find by index safely
+    snap_ids = [s.snapshot_id for s in snapshots]
+    logger.info(f"Snapshot history: {snap_ids}")
+
+    # Tag the first release and create a dev branch from mid-history
+    # snap_ids[0] = after initial 2022 write
+    # snap_ids[-3 or so] = after 2023 write (before spec_2 / schema_2 evolution)
+    # snap_ids[-1] = current HEAD (after 2024 write)
+    if len(snap_ids) >= 2:
+        with table.manage_snapshots() as ms:
+            # Tag the initial 2022 snapshot as a stable release baseline
+            ms.create_tag(snap_ids[0], "v2022-baseline")
+            logger.info(f"Created tag v2022-baseline → {snap_ids[0]}")
+
+            # Create a dev branch pointing to the snapshot just before the 2024 write
+            # (i.e. the state after 2023 data was written)
+            dev_snap = snap_ids[-2] if len(snap_ids) >= 2 else snap_ids[-1]
+            ms.create_branch(dev_snap, "dev")
+            logger.info(f"Created branch dev → {dev_snap}")
+
+            # Create an experimental branch from the very first snapshot
+            ms.create_branch(snap_ids[0], "experimental")
+            logger.info(f"Created branch experimental → {snap_ids[0]}")
+
+    logger.info(f"Populated analytics.standings with {len(standings_data)} records, "
+                f"{len(snap_ids)} snapshots, and named branches")
 
 
 @click.command()

@@ -64,17 +64,17 @@ class TUIApp(App):
         border-top: solid $boost;
     }
 
-    #snapshots-split {
+    #branches-split {
         height: 1fr;
     }
 
-    #snapshots-list-pane {
-        width: 55%;
+    #branches-list-pane {
+        width: 40%;
         border-right: solid $boost;
     }
 
-    #snapshots-graph-pane {
-        width: 45%;
+    #branches-graph-pane {
+        width: 60%;
         background: $surface;
         padding: 0 1;
     }
