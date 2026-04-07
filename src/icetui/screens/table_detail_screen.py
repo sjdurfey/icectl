@@ -294,7 +294,7 @@ class TableDetailScreen(Screen):
                 sid = row.get("_source_id")
                 spec_id = row.get("_spec_id", "")
                 spec_source_ids.setdefault(spec_id, set())
-                if sid is not None:
+                if sid is not None and sid != "—":
                     spec_source_ids[spec_id].add(int(sid))
 
         compatible_spec_ids = {
@@ -509,22 +509,26 @@ class TableDetailScreen(Screen):
             # Connector row between nodes (pipes + diagonals for forks/merges)
             if row_i < len(snapshots) - 1:
                 result.append("\n")
-                # Lanes whose first node is on the *next* row are represented by \ in
-                # the gap — suppress their | so we get |\ instead of |\|.
-                suppressed = {
-                    li + 1
-                    for li in range(num_lanes - 1)
-                    if lane_first_row.get(li + 1) == row_i + 1
-                }
                 connector = Text()
                 for li in range(num_lanes):
-                    if li not in suppressed and li in lane_active_until and lane_active_until[li] >= row_i:
-                        connector.append("|", style="dim white")
-                    else:
-                        connector.append(" ")
+                    # Show | only if the lane has already started (first node at or
+                    # above this row) and is still active (same-lane parent below).
+                    # Using <= row_i (not < row_i) so a node's own connector row is
+                    # also covered; the \ case (first_row == row_i+1) naturally
+                    # evaluates to False here, so no separate suppression needed.
+                    is_pipe = (
+                        li in lane_active_until
+                        and lane_active_until[li] >= row_i
+                        and lane_first_row.get(li, row_i + 1) <= row_i
+                    )
+                    connector.append("|" if is_pipe else " ", style="dim white" if is_pipe else "default")
                     if li < num_lanes - 1:
                         next_lane = li + 1
-                        if lane_first_row.get(next_lane) == row_i + 1:
+                        if (lane_first_row.get(next_lane) == row_i + 1
+                                and lane_first_row.get(li, row_i + 1) <= row_i
+                                and lane_active_until.get(li, -1) >= row_i):
+                            # Only draw \ if the source lane (li) has a pipe here;
+                            # otherwise the diagonal has nothing to branch from.
                             connector.append("\\", style="dim white")
                         elif (lane_last_row.get(next_lane) == row_i and
                               lane_last_parent_lane.get(next_lane, next_lane) < next_lane):

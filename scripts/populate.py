@@ -914,6 +914,165 @@ def create_and_populate_standings_table(catalog):
     )
 
 
+def create_long_dag_table(catalog):
+    """Create a table with 40 linear snapshots to test DAG scroll behaviour."""
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import LongType, StringType, NestedField
+
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(2, "note", StringType(), required=False),
+    )
+
+    try:
+        table = catalog.create_table("analytics.long_dag", schema=schema)
+        logger.info("Created table: analytics.long_dag")
+    except Exception as e:
+        logger.debug(f"analytics.long_dag already exists ({e}), loading")
+        table = catalog.load_table("analytics.long_dag")
+
+    pa_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+        pa.field("note", pa.string(), nullable=True),
+    ])
+
+    table.overwrite(pa.table({"id": pa.array([1], type=pa.int64()), "note": pa.array(["commit 1"])}, schema=pa_schema))
+    for i in range(2, 41):
+        table.append(pa.table({"id": pa.array([i], type=pa.int64()), "note": pa.array([f"commit {i}"])}, schema=pa_schema))
+
+    table.refresh()
+    snapshots = sorted(table.metadata.snapshots, key=lambda s: s.timestamp_ms)
+    with table.manage_snapshots() as ms:
+        ms.create_tag(snapshots[0].snapshot_id, "v1.0")
+        ms.create_tag(snapshots[19].snapshot_id, "v2.0")
+        ms.create_tag(snapshots[39].snapshot_id, "v3.0")
+
+    logger.info("Populated analytics.long_dag with 40 snapshots (linear chain)")
+
+
+def create_branches_demo_table(catalog):
+    """Create a minimal table with a 3-lane snapshot DAG.
+
+    Demonstrates branches-off-branches: the hotfix branch forks from the
+    feature branch (not from main).
+
+    Desired DAG (newest-first, * = current main HEAD):
+
+        o [hotfix]   S8  parent=S5
+        |
+        o            S5  parent=S4
+     \\ /
+       o [feature]   S7  parent=S4
+       |
+       o             S4  parent=S2  ← hotfix forks here (branch off feature!)
+      /
+    *     [main]     S9  parent=S6
+    |
+    o                S6  parent=S3
+    |
+    o                S3  parent=S2
+    |
+    o                S2  parent=S1  ← feature forks here
+    |
+    o [tag:v1.0]     S1  root
+
+    Creation order controls timestamps, which determines lane assignment:
+    write main's continuation (S6, S9) before the branches so it stays lane 0.
+    """
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import LongType, StringType, NestedField
+
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(2, "label", StringType(), required=False),
+    )
+
+    try:
+        table = catalog.create_table("analytics.branches_demo", schema=schema)
+        logger.info("Created table: analytics.branches_demo")
+    except Exception as e:
+        logger.debug(f"analytics.branches_demo already exists ({e}), loading")
+        table = catalog.load_table("analytics.branches_demo")
+
+    def snap(row_id, label):
+        return pa.table(
+            {
+                "id": pa.array([row_id], type=pa.int64()),
+                "label": pa.array([label], type=pa.string()),
+            },
+            schema=pa.schema([
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field("label", pa.string(), nullable=True),
+            ]),
+        )
+
+    # ── Linear main: S1 → S2 → S3 ────────────────────────────────────────────
+    table.overwrite(snap(1, "S1 initial"))
+    table.refresh()
+    S1_id = table.metadata.current_snapshot_id
+
+    table.append(snap(2, "S2 main"))
+    table.refresh()
+    S2_id = table.metadata.current_snapshot_id
+
+    table.append(snap(3, "S3 main"))
+    table.refresh()
+    S3_id = table.metadata.current_snapshot_id
+
+    # ── Main continues first (S3→S6→S9): written before branches so these
+    #    become the first children of S3/S6 and inherit lane 0. ────────────────
+    table.append(snap(6, "S6 main-cont"))
+    table.refresh()
+    S6_id = table.metadata.current_snapshot_id
+
+    table.append(snap(9, "S9 main-latest"))
+    table.refresh()
+    S9_id = table.metadata.current_snapshot_id
+    logger.info(f"Main chain: S1={S1_id} S2={S2_id} S3={S3_id} S6={S6_id} S9={S9_id}")
+
+    # ── Feature branch: forks from S2 (2nd child of S2 → lane 1) ─────────────
+    with table.manage_snapshots() as ms:
+        ms.create_branch(S2_id, "main")
+    table.refresh()
+
+    table.append(snap(4, "S4 feature-1"))
+    table.refresh()
+    S4_id = table.metadata.current_snapshot_id
+
+    # S7 is written next — becomes 1st child of S4, inherits lane 1
+    table.append(snap(7, "S7 feature-2"))
+    table.refresh()
+    S7_id = table.metadata.current_snapshot_id
+    logger.info(f"Feature chain: S4={S4_id} S7={S7_id}")
+
+    # ── Hotfix branch: forks from S4 (2nd child of S4 → lane 2)
+    #    This is the "branch off branch" — hotfix branches from feature! ───────
+    with table.manage_snapshots() as ms:
+        ms.create_branch(S4_id, "main")
+    table.refresh()
+
+    table.append(snap(5, "S5 hotfix-1"))
+    table.refresh()
+    S5_id = table.metadata.current_snapshot_id
+
+    table.append(snap(8, "S8 hotfix-2"))
+    table.refresh()
+    S8_id = table.metadata.current_snapshot_id
+    logger.info(f"Hotfix chain: S5={S5_id} S8={S8_id}")
+
+    # ── Set final branches/tags and restore main ──────────────────────────────
+    with table.manage_snapshots() as ms:
+        ms.create_branch(S9_id, "main")
+        ms.create_branch(S7_id, "feature")
+        ms.create_branch(S8_id, "hotfix")
+        ms.create_tag(S1_id, "v1.0")
+
+    logger.info(
+        "Populated analytics.branches_demo: 9 snapshots, 3-lane DAG "
+        "(main: S1→S2→S3→S6→S9, feature: S2→S4→S7, hotfix: S4→S5→S8)"
+    )
+
+
 @click.command()
 @click.option(
     "--drop",
@@ -951,11 +1110,18 @@ def main(drop: bool) -> None:
         logger.info("Creating and populating standings table (partition evolution demo)...")
         create_and_populate_standings_table(catalog)
 
+        logger.info("Creating branches demo table (3-lane DAG: branch-off-branch)...")
+        create_branches_demo_table(catalog)
+
+        logger.info("Creating long DAG table (40 snapshots, scroll test)...")
+        create_long_dag_table(catalog)
+
         logger.info("✅ Baseball data population completed successfully!")
         logger.info("Data summary:")
         logger.info("  - 4 namespaces: teams, players, leagues, analytics")
-        logger.info("  - 5 tables with comprehensive baseball data")
+        logger.info("  - 6 tables with comprehensive baseball data")
         logger.info("  - 100,000+ total records for realistic testing")
+        logger.info("  - analytics.branches_demo: 3-lane branch-off-branch DAG demo")
         logger.info("")
         logger.info("Test with: scripts/run_integration.sh")
 
