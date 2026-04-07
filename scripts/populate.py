@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "pyiceberg>=0.9.1",
+#     "pyiceberg[pyiceberg-core]>=0.9.1",
 #     "pyarrow>=21.0.0",
 #     "s3fs>=2024.1.0",
 #     "click>=8.0"
@@ -384,6 +384,29 @@ def generate_performance_metrics_data():
     return metrics
 
 
+def generate_standings_data():
+    """Generate team season standings for 2022-2024."""
+    teams = generate_team_data()
+
+    # Group teams by (league, division)
+    divisions: dict = {}
+    for t in teams:
+        key = (t[6], t[7])  # league, division
+        divisions.setdefault(key, []).append(t[0])  # team_id
+
+    standings = []
+    for year in [2022, 2023, 2024]:
+        for (league, division), team_ids in divisions.items():
+            shuffled = list(team_ids)
+            random.shuffle(shuffled)
+            for rank, team_id in enumerate(shuffled, 1):
+                wins = random.randint(55, 107)
+                losses = 162 - wins
+                standings.append((team_id, year, wins, losses, rank, league, division))
+
+    return standings
+
+
 def write_in_chunks(table, pa_table: pa.Table, num_chunks: int = 10) -> None:
     """Write a PyArrow table in chunks to produce multiple snapshots."""
     n = len(pa_table)
@@ -410,6 +433,8 @@ def create_and_populate_teams_tables(catalog):
     """Create and populate teams namespace tables."""
     from pyiceberg.schema import Schema
     from pyiceberg.types import StringType, IntegerType, NestedField
+    from pyiceberg.partitioning import PartitionSpec, PartitionField
+    from pyiceberg.transforms import IdentityTransform
 
     # Create franchises table
     franchises_schema = Schema(
@@ -423,8 +448,12 @@ def create_and_populate_teams_tables(catalog):
         NestedField(8, "division", StringType(), required=True),
     )
 
+    franchises_partition_spec = PartitionSpec(
+        PartitionField(source_id=7, field_id=1000, transform=IdentityTransform(), name="league")
+    )
+
     try:
-        table = catalog.create_table("teams.franchises", schema=franchises_schema)
+        table = catalog.create_table("teams.franchises", schema=franchises_schema, partition_spec=franchises_partition_spec)
         logger.info("Created table: teams.franchises")
     except Exception as e:
         logger.debug(f"teams.franchises already exists or create failed ({e}), loading instead")
@@ -465,6 +494,8 @@ def create_and_populate_players_tables(catalog):
     """Create and populate players namespace tables."""
     from pyiceberg.schema import Schema
     from pyiceberg.types import StringType, IntegerType, DateType, DecimalType, NestedField
+    from pyiceberg.partitioning import PartitionSpec, PartitionField
+    from pyiceberg.transforms import IdentityTransform
 
     # Create roster table
     roster_schema = Schema(
@@ -479,8 +510,12 @@ def create_and_populate_players_tables(catalog):
         NestedField(9, "debut_date", DateType(), required=False),
     )
 
+    roster_partition_spec = PartitionSpec(
+        PartitionField(source_id=4, field_id=1000, transform=IdentityTransform(), name="team_id")
+    )
+
     try:
-        roster_table = catalog.create_table("players.roster", schema=roster_schema)
+        roster_table = catalog.create_table("players.roster", schema=roster_schema, partition_spec=roster_partition_spec)
         logger.info("Created table: players.roster")
     except Exception as e:
         logger.debug(f"players.roster already exists or create failed ({e}), loading instead")
@@ -534,8 +569,12 @@ def create_and_populate_players_tables(catalog):
         NestedField(13, "avg", DecimalType(precision=5, scale=3), required=False),
     )
 
+    batting_partition_spec = PartitionSpec(
+        PartitionField(source_id=2, field_id=1000, transform=IdentityTransform(), name="season")
+    )
+
     try:
-        batting_table = catalog.create_table("players.batting_stats", schema=batting_schema)
+        batting_table = catalog.create_table("players.batting_stats", schema=batting_schema, partition_spec=batting_partition_spec)
         logger.info("Created table: players.batting_stats")
     except Exception as e:
         logger.debug(f"players.batting_stats already exists or create failed ({e}), loading instead")
@@ -586,6 +625,8 @@ def create_and_populate_analytics_tables(catalog):
     from pyiceberg.schema import Schema
     from pyiceberg.types import (StringType, IntegerType, DateType, TimestampType,
                                  DecimalType, NestedField)
+    from pyiceberg.partitioning import PartitionSpec, PartitionField
+    from pyiceberg.transforms import YearTransform, MonthTransform
 
     # Create game_logs table
     game_logs_schema = Schema(
@@ -601,8 +642,12 @@ def create_and_populate_analytics_tables(catalog):
         NestedField(10, "temperature", IntegerType(), required=False),
     )
 
+    game_logs_partition_spec = PartitionSpec(
+        PartitionField(source_id=2, field_id=1000, transform=YearTransform(), name="game_date_year")
+    )
+
     try:
-        game_logs_table = catalog.create_table("analytics.game_logs", schema=game_logs_schema)
+        game_logs_table = catalog.create_table("analytics.game_logs", schema=game_logs_schema, partition_spec=game_logs_partition_spec)
         logger.info("Created table: analytics.game_logs")
     except Exception as e:
         logger.debug(f"analytics.game_logs already exists or create failed ({e}), loading instead")
@@ -652,8 +697,12 @@ def create_and_populate_analytics_tables(catalog):
         NestedField(7, "unit", StringType(), required=False),
     )
 
+    metrics_partition_spec = PartitionSpec(
+        PartitionField(source_id=4, field_id=1000, transform=MonthTransform(), name="timestamp_month")
+    )
+
     try:
-        metrics_table = catalog.create_table("analytics.performance_metrics", schema=metrics_schema)
+        metrics_table = catalog.create_table("analytics.performance_metrics", schema=metrics_schema, partition_spec=metrics_partition_spec)
         logger.info("Created table: analytics.performance_metrics")
     except Exception as e:
         logger.debug(f"analytics.performance_metrics already exists or create failed ({e}), loading instead")
@@ -685,6 +734,90 @@ def create_and_populate_analytics_tables(catalog):
     metrics_pa_table = pa.Table.from_arrays(metrics_arrays, schema=pa_metrics_schema)
     write_in_chunks(metrics_table, metrics_pa_table)
     logger.info(f"Populated analytics.performance_metrics with {len(metrics_data)} records")
+
+
+def create_and_populate_standings_table(catalog):
+    """Create standings table with partition spec evolution.
+
+    Demonstrates:
+    - spec_0: identity(league)  — written with 2022 data
+    - spec_1: identity(league) + identity(season)  — written with 2023/2024 data
+    """
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import StringType, IntegerType, NestedField
+    from pyiceberg.partitioning import PartitionSpec, PartitionField
+    from pyiceberg.transforms import IdentityTransform
+
+    standings_schema = Schema(
+        NestedField(1, "team_id", StringType(), required=True),
+        NestedField(2, "season", IntegerType(), required=True),
+        NestedField(3, "wins", IntegerType(), required=False),
+        NestedField(4, "losses", IntegerType(), required=False),
+        NestedField(5, "division_rank", IntegerType(), required=False),
+        NestedField(6, "league", StringType(), required=True),
+        NestedField(7, "division", StringType(), required=True),
+    )
+
+    # Initial spec: partition by league only
+    initial_spec = PartitionSpec(
+        PartitionField(source_id=6, field_id=1000, transform=IdentityTransform(), name="league")
+    )
+
+    try:
+        table = catalog.create_table(
+            "analytics.standings",
+            schema=standings_schema,
+            partition_spec=initial_spec,
+        )
+        logger.info("Created table: analytics.standings")
+    except Exception as e:
+        logger.debug(f"analytics.standings already exists ({e}), loading instead")
+        table = catalog.load_table("analytics.standings")
+
+    standings_data = generate_standings_data()
+
+    pa_schema = pa.schema([
+        pa.field("team_id", pa.string(), nullable=False),
+        pa.field("season", pa.int32(), nullable=False),
+        pa.field("wins", pa.int32(), nullable=True),
+        pa.field("losses", pa.int32(), nullable=True),
+        pa.field("division_rank", pa.int32(), nullable=True),
+        pa.field("league", pa.string(), nullable=False),
+        pa.field("division", pa.string(), nullable=False),
+    ])
+
+    def to_pa_table(rows):
+        return pa.Table.from_arrays([
+            pa.array([s[0] for s in rows]),  # team_id
+            pa.array([s[1] for s in rows]),  # season
+            pa.array([s[2] for s in rows]),  # wins
+            pa.array([s[3] for s in rows]),  # losses
+            pa.array([s[4] for s in rows]),  # division_rank
+            pa.array([s[5] for s in rows]),  # league
+            pa.array([s[6] for s in rows]),  # division
+        ], schema=pa_schema)
+
+    # Write 2022 data under spec_0 (league only)
+    data_2022 = [s for s in standings_data if s[1] == 2022]
+    table.overwrite(to_pa_table(data_2022))
+    logger.info(f"Wrote {len(data_2022)} rows under spec_0 (league)")
+
+    # Evolve partition spec: add season → creates spec_1 (league + season)
+    with table.update_spec() as update:
+        update.add_field("season", IdentityTransform(), partition_field_name="season")
+    logger.info("Evolved partition spec to spec_1 (league + season)")
+
+    # Write 2023 data under spec_1
+    data_2023 = [s for s in standings_data if s[1] == 2023]
+    table.append(to_pa_table(data_2023))
+    logger.info(f"Wrote {len(data_2023)} rows under spec_1 (league + season)")
+
+    # Write 2024 data under spec_1
+    data_2024 = [s for s in standings_data if s[1] == 2024]
+    table.append(to_pa_table(data_2024))
+    logger.info(f"Wrote {len(data_2024)} rows under spec_1 (league + season)")
+
+    logger.info(f"Populated analytics.standings with {len(standings_data)} records across 2 partition specs")
 
 
 @click.command()
@@ -720,6 +853,9 @@ def main(drop: bool) -> None:
 
         logger.info("Creating and populating analytics tables...")
         create_and_populate_analytics_tables(catalog)
+
+        logger.info("Creating and populating standings table (partition evolution demo)...")
+        create_and_populate_standings_table(catalog)
 
         logger.info("✅ Baseball data population completed successfully!")
         logger.info("Data summary:")

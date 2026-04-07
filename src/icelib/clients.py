@@ -160,7 +160,7 @@ def get_table_schema(cat: Catalog, table_name: str) -> Dict[str, Any]:
             "optional": not field.required,
             "comment": getattr(field, "doc", None),
         })
-    
+
     return {
         "table": table_name,
         "schema_id": schema.schema_id,
@@ -325,6 +325,46 @@ def get_table_snapshots(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:
     # Sort by timestamp (newest first)
     snapshots.sort(key=lambda s: s["timestamp"], reverse=True)
     return snapshots
+
+
+def get_partition_specs(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:
+    """Return full partition spec history for a table, newest first."""
+    from pyiceberg.catalog import load_catalog
+
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    table = ice_catalog.load_table(table_name)
+    metadata = table.metadata
+
+    current_spec_id = getattr(metadata, "default_spec_id", None)
+    rows = []
+
+    for spec in getattr(metadata, "partition_specs", []):
+        spec_id = getattr(spec, "spec_id", None)
+        is_current = spec_id == current_spec_id
+        fields = getattr(spec, "fields", [])
+
+        if not fields:
+            rows.append({
+                "spec_id": str(spec_id) if spec_id is not None else "—",
+                "field_name": "(unpartitioned)",
+                "transform": "—",
+                "source_id": "—",
+                "is_current": is_current,
+            })
+        else:
+            for pf in fields:
+                rows.append({
+                    "spec_id": str(spec_id) if spec_id is not None else "—",
+                    "field_name": getattr(pf, "name", "—"),
+                    "transform": str(getattr(pf, "transform", "—")),
+                    "source_id": str(getattr(pf, "source_id", "—")),
+                    "is_current": is_current,
+                })
+
+    # Sort so active spec appears first, then by spec_id descending
+    rows.sort(key=lambda r: (not r["is_current"], -int(r["spec_id"]) if r["spec_id"].lstrip("-").isdigit() else 0))
+    return rows
 
 
 def get_table_branches(cat: Catalog, table_name: str) -> List[Dict[str, Any]]:

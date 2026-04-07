@@ -32,6 +32,14 @@ class FilterableDataTable(DataTable):
         # Apply current filter
         self.apply_filter()
     
+    @staticmethod
+    def _coerce_cell(value: Any) -> Any:
+        """Return Rich Text as-is; stringify everything else."""
+        from rich.text import Text
+        if isinstance(value, Text):
+            return value
+        return str(value) if value is not None else ""
+
     def _get_column_keys(self) -> List[str]:
         """Return the string key for each column in display order."""
         keys = []
@@ -63,7 +71,7 @@ class FilterableDataTable(DataTable):
 
         column_keys = self._get_column_keys()
         for i, row in enumerate(self._filtered_rows):
-            row_values = [str(row.get(key, "")) for key in column_keys]
+            row_values = [self._coerce_cell(row.get(key, "")) for key in column_keys]
             self.add_row(*row_values, key=str(i))
     
     def highlight_cells(self, coords: Set[tuple]) -> None:
@@ -76,7 +84,7 @@ class FilterableDataTable(DataTable):
         # Reset previously highlighted cells
         for row_i, col_key in self._highlighted_row_indices:
             if row_i < len(self._filtered_rows):
-                value = str(self._filtered_rows[row_i].get(col_key, ""))
+                value = self._coerce_cell(self._filtered_rows[row_i].get(col_key, ""))
                 try:
                     self.update_cell(str(row_i), col_key, value, update_width=False)
                 except Exception:

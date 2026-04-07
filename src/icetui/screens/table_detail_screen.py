@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 import logging
 
 from textual.screen import Screen
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable
 from textual.binding import Binding
 from textual.message import Message
@@ -40,6 +40,7 @@ class TableDetailScreen(Screen):
         self.sample_table: Optional[FilterableDataTable] = None
         self.snapshots_table: Optional[FilterableDataTable] = None
         self.branches_table: Optional[FilterableDataTable] = None
+        self.partition_specs_content: Optional[Static] = None
         
     def compose(self):
         """Compose the screen layout."""
@@ -49,17 +50,20 @@ class TableDetailScreen(Screen):
             
             with TabbedContent(initial="schema"):
                 with TabPane("Schema", id="schema"):
-                    yield FilterableDataTable(id="schema-table")
-                    
+                    with Vertical():
+                        yield FilterableDataTable(id="schema-table")
+                        yield Static("Partition Specs", id="partition-specs-label", classes="section-label")
+                        yield FilterableDataTable(id="schema-partition-specs")
+
                 with TabPane("Sample Data", id="sample"):
                     yield FilterableDataTable(id="sample-table")
-                    
+
                 with TabPane("Properties", id="properties"):
                     yield FilterableDataTable(id="properties-table")
-                    
+
                 with TabPane("Snapshots", id="snapshots"):
                     yield FilterableDataTable(id="snapshots-table")
-                    
+
                 with TabPane("Branches", id="branches"):
                     yield FilterableDataTable(id="branches-table")
             
@@ -72,7 +76,8 @@ class TableDetailScreen(Screen):
         self.properties_table = self.query_one("#properties-table", FilterableDataTable)
         self.snapshots_table = self.query_one("#snapshots-table", FilterableDataTable)
         self.branches_table = self.query_one("#branches-table", FilterableDataTable)
-        
+        self.schema_partition_specs = self.query_one("#schema-partition-specs", FilterableDataTable)
+
         # Focus the first table by default
         self.schema_table.focus()
         
@@ -87,12 +92,14 @@ class TableDetailScreen(Screen):
         self.sample_table.set_data(["INFO"], [{"INFO": "Press 'l' to load sample data"}])
         self.snapshots_table.set_data(["LOADING"], [{"LOADING": "Loading snapshots..."}])
         self.branches_table.set_data(["LOADING"], [{"LOADING": "Loading branches..."}])
-        
-        # Load schema, properties, snapshots and branches immediately for fast response
+        self.schema_partition_specs.set_data(["LOADING"], [{"LOADING": "Loading partition specs..."}])
+
+        # Load schema, properties, snapshots, branches, and partition specs immediately
         self.run_worker(self.load_schema_data_worker, name="schema", thread=True)
         self.run_worker(self.load_properties_data_worker, name="properties", thread=True)
         self.run_worker(self.load_snapshots_data_worker, name="snapshots", thread=True)
         self.run_worker(self.load_branches_data_worker, name="branches", thread=True)
+        self.run_worker(self.load_partition_specs_worker, name="partition_specs", thread=True)
         
     def start_sample_worker(self) -> None:
         """Start the sample data worker with lower priority."""
@@ -120,13 +127,14 @@ class TableDetailScreen(Screen):
             
             columns = ["COLUMN", "TYPE", "NULLABLE", "COMMENT"]
             rows = []
-            
+
             for col in schema_info["columns"]:
                 rows.append({
                     "COLUMN": col.get("name", ""),
                     "TYPE": col.get("type", ""),
-                    "NULLABLE": "optional" if col.get("optional", True) else "required", 
-                    "COMMENT": col.get("comment", "—")
+                    "NULLABLE": "optional" if col.get("optional", True) else "required",
+                    "COMMENT": col.get("comment") or "—",
+                    "_field_id": col.get("id"),  # not displayed, used for spec cross-link
                 })
             
             logger.info(f"Loaded schema with {len(rows)} columns")
@@ -172,7 +180,13 @@ class TableDetailScreen(Screen):
                     self.branches_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
                 else:
                     self.branches_table.set_data(result["columns"], result["rows"])
-        
+
+            elif event.worker.name == "partition_specs":
+                if "error" in result:
+                    self.schema_partition_specs.set_data(["ERROR"], [{"ERROR": result["error"]}])
+                else:
+                    self.schema_partition_specs.set_data(result["columns"], result["rows"])
+
         elif event.state == WorkerState.ERROR:
             error_msg = f"Worker failed: {str(event.worker.error)}"
             if event.worker.name == "schema":
@@ -185,7 +199,73 @@ class TableDetailScreen(Screen):
                 self.snapshots_table.set_data(["ERROR"], [{"ERROR": error_msg}])
             elif event.worker.name == "branches":
                 self.branches_table.set_data(["ERROR"], [{"ERROR": error_msg}])
-    
+            elif event.worker.name == "partition_specs":
+                self.schema_partition_specs.set_data(["ERROR"], [{"ERROR": error_msg}])
+
+    def load_partition_specs_worker(self) -> Dict[str, Any]:
+        """Load partition spec history in background worker."""
+        try:
+            from rich.text import Text as RichText
+
+            config = getattr(self.app, 'config', None)
+            if not config:
+                return {"error": "App config not yet loaded"}
+            catalog_config = config.catalogs.get(self.catalog_name)
+            if not catalog_config:
+                return {"error": f"Catalog '{self.catalog_name}' not found in config"}
+
+            logger.info(f"Loading partition specs for table '{self.full_table_name}'")
+            spec_rows = clients.get_partition_specs(catalog_config, self.full_table_name)
+
+            # Group by spec_id (preserving order from client)
+            grouped: Dict[str, list] = {}
+            for r in spec_rows:
+                grouped.setdefault(r["spec_id"], []).append(r)
+
+            columns = ["SPEC", "FIELD", "TRANSFORM"]
+            rows = []
+            for spec_id, fields in grouped.items():
+                is_active = fields[0]["is_current"]
+
+                # Header row for this spec
+                if is_active:
+                    label = RichText.assemble(
+                        ("  Spec ", "bold"), (spec_id, "bold cyan"), ("  ★ active", "bold green")
+                    )
+                else:
+                    label = RichText.assemble(
+                        ("  Spec ", "dim"), (spec_id, "dim cyan"), ("  superseded", "dim")
+                    )
+                rows.append({
+                    "SPEC": label,
+                    "FIELD": RichText("", style="dim"),
+                    "TRANSFORM": RichText("", style="dim"),
+                    "_is_header": True,
+                    "_source_id": None,
+                    "_is_active": is_active,
+                })
+
+                # Field rows
+                field_style = "bold" if is_active else "dim"
+                for f in fields:
+                    rows.append({
+                        "SPEC": RichText("", style=field_style),
+                        "FIELD": RichText(f"  {f['field_name']}", style=field_style),
+                        "TRANSFORM": RichText(f["transform"], style=field_style),
+                        "_is_header": False,
+                        "_source_id": f["source_id"],
+                        "_is_active": is_active,
+                    })
+
+            logger.info(f"Loaded partition specs: {len(grouped)} spec(s)")
+            return {"columns": columns, "rows": rows}
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to load partition specs for '{self.full_table_name}': {e}")
+            logger.error(traceback.format_exc())
+            return {"error": f"Failed to load partition specs: {str(e)}"}
+
     def load_sample_data_worker(self) -> Dict[str, Any]:
         """Load table sample data in background worker."""
         try:
@@ -359,20 +439,38 @@ class TableDetailScreen(Screen):
             return {"error": f"Failed to load branches: {str(e)}"}
     
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        """Highlight the parent snapshot whenever a snapshot row is selected."""
-        logger.debug(
-            "RowHighlighted: data_table=%r  is_snapshots=%s  cursor_row=%d",
-            event.data_table,
-            event.data_table is self.snapshots_table,
-            event.cursor_row,
-        )
+        """Handle row highlight events across all tables."""
+        # Partition spec → schema cross-link
+        if event.data_table is self.schema_partition_specs:
+            rows = self.schema_partition_specs._filtered_rows
+            row_index = event.cursor_row
+            if not rows or row_index >= len(rows):
+                self.schema_table.highlight_cells(set())
+                return
+            row = rows[row_index]
+            if row.get("_is_header"):
+                self.schema_table.highlight_cells(set())
+                return
+            source_id = row.get("_source_id")
+            if source_id is not None:
+                schema_rows = self.schema_table._filtered_rows
+                targets = {
+                    i for i, sr in enumerate(schema_rows)
+                    if str(sr.get("_field_id", "")) == str(source_id)
+                }
+                self.schema_table.highlight_cells({(i, "COLUMN") for i in targets})
+            else:
+                self.schema_table.highlight_cells(set())
+            return
+
+        # Snapshot parent highlight
         if event.data_table is not self.snapshots_table:
             return
 
         rows = self.snapshots_table._filtered_rows
         row_index = event.cursor_row
         if not rows or row_index >= len(rows):
-            self.snapshots_table.highlight_rows(set())
+            self.snapshots_table.highlight_cells(set())
             return
 
         parent_id = rows[row_index].get("PARENT_ID", "—")

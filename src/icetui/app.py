@@ -30,21 +30,33 @@ class TUIApp(App):
     Screen {
         layout: vertical;
     }
-    
+
     Header {
         dock: top;
     }
-    
+
     Footer {
         dock: bottom;
     }
-    
+
     .error-dialog {
         border: thick red;
         background: $panel;
         color: $text;
         width: 60%;
         height: 50%;
+    }
+
+    .section-label {
+        height: 1;
+        background: $boost;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    #schema-partition-specs {
+        height: 10;
+        border-top: solid $boost;
     }
     """
     
