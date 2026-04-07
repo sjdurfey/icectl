@@ -3,17 +3,109 @@
 from typing import Dict, Any, List, Optional
 import logging
 
-from textual.screen import Screen
+from datetime import datetime
+
+from textual.screen import Screen, ModalScreen
+from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll, Horizontal
-from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable, Select
+from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable, Select, Button
 from textual.binding import Binding
 from textual.message import Message
 from textual.worker import Worker, WorkerState
+from textual import events
 
 from ..widgets.data_table import FilterableDataTable
 import icelib.clients as clients
 
 logger = logging.getLogger(__name__)
+
+
+class SnapshotGraph(Static, can_focus=False):
+    """DAG graph widget that emits a message when a node row is clicked."""
+
+    class NodeClicked(Message):
+        def __init__(self, row_index: int) -> None:
+            super().__init__()
+            self.row_index = row_index
+
+    def on_click(self, event: events.Click) -> None:
+        # Each snapshot occupies 2 lines (node + connector), except the last.
+        self.post_message(self.NodeClicked(event.y // 2))
+
+
+class SnapshotDetailModal(ModalScreen):
+    """Pop-up showing details for a single snapshot."""
+
+    DEFAULT_CSS = """
+    SnapshotDetailModal {
+        align: center middle;
+    }
+    #snapshot-modal {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: round $primary;
+        padding: 1 2;
+    }
+    #snapshot-modal-title {
+        text-style: bold;
+        color: $primary;
+        margin-bottom: 1;
+    }
+    #snapshot-modal-body {
+        margin-bottom: 1;
+    }
+    #snapshot-modal-close {
+        width: 100%;
+    }
+    """
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, snapshot: Dict[str, Any], branch_names: List[str], ancestor_names: List[str] = []) -> None:
+        super().__init__()
+        self._snapshot = snapshot
+        self._branch_names = branch_names
+        self._ancestor_names = ancestor_names
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="snapshot-modal"):
+            yield Static("Snapshot Details", id="snapshot-modal-title")
+            yield Static(self._build_content(), id="snapshot-modal-body")
+            yield Button("Close  [Esc]", id="snapshot-modal-close", variant="primary")
+
+    def _build_content(self) -> str:
+        snap = self._snapshot
+        ts = snap.get("timestamp_ms") or snap.get("timestamp")
+        if isinstance(ts, (int, float)):
+            ts_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        elif isinstance(ts, str) and ts not in ("—", ""):
+            ts_str = ts
+        else:
+            ts_str = "—"
+
+        if self._branch_names:
+            refs = ", ".join(self._branch_names)
+        elif self._ancestor_names:
+            refs = "on: " + ", ".join(self._ancestor_names)
+        else:
+            refs = "—"
+        parent = snap.get("parent_id") or "—"
+
+        rows = [
+            ("Snapshot ID", snap.get("snapshot_id", "—")),
+            ("Parent ID",   parent),
+            ("Timestamp",   ts_str),
+            ("Operation",   snap.get("operation", "—")),
+            ("Refs",        refs),
+            ("Records",     str(snap.get("total_records", "—"))),
+            ("Is Current",  "yes" if snap.get("is_current") else "no"),
+        ]
+        label_w = max(len(r[0]) for r in rows)
+        return "\n".join(f"{label:<{label_w}}  {value}" for label, value in rows)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss()
 
 
 class TableDetailScreen(Screen):
@@ -42,7 +134,8 @@ class TableDetailScreen(Screen):
         self.branches_table: Optional[FilterableDataTable] = None
         self.schema_selector: Optional[Select] = None
         self._all_partition_spec_rows: list = []  # cached for schema-filtered re-render
-        self._branch_map: Dict[str, List[str]] = {}  # snapshot_id → [ref_names]
+        self._branch_map: Dict[str, List[str]] = {}   # snapshot_id → [direct ref names]
+        self._ancestor_map: Dict[str, List[str]] = {} # snapshot_id → [branch names it's on]
         self._snapshots_raw: List[Dict] = []          # raw snapshot dicts (newest-first)
         self.snapshot_graph_widget: Optional[Static] = None
         
@@ -74,7 +167,7 @@ class TableDetailScreen(Screen):
                         with Vertical(id="branches-list-pane"):
                             yield FilterableDataTable(id="branches-table")
                         with VerticalScroll(id="branches-graph-pane"):
-                            yield Static("", id="snapshot-dag", markup=False)
+                            yield SnapshotGraph("", id="snapshot-dag", markup=False)
             
             yield Footer()
     
@@ -234,6 +327,7 @@ class TableDetailScreen(Screen):
                     self.snapshots_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
                 else:
                     self._branch_map = result["branch_map"]
+                    self._ancestor_map = result["ancestor_map"]
                     self._snapshots_raw = result["snapshots_raw"]
                     self.snapshots_table.set_data(
                         result["columns"],
@@ -743,11 +837,31 @@ class TableDetailScreen(Screen):
                     "_branch_names": branch_names,
                 })
 
+            # Build ancestor_map: for each branch (not tag), walk parent chain
+            # and record which branches each snapshot belongs to.
+            parent_map = {
+                str(s.get("snapshot_id", "")): str(s.get("parent_id", ""))
+                for s in snapshots
+                if s.get("parent_id") and s.get("parent_id") != "—"
+            }
+            ancestor_map: Dict[str, List[str]] = {}
+            for ref in branches:
+                if ref.get("type") == "tag":
+                    continue
+                branch_name = ref.get("name", "")
+                current = ref.get("snapshot_id", "—")
+                while current and current != "—":
+                    bucket = ancestor_map.setdefault(current, [])
+                    if branch_name not in bucket:
+                        bucket.append(branch_name)
+                    current = parent_map.get(current, "")
+
             logger.info(f"Loaded {len(rows)} snapshots, {len(branch_map)} refs")
             return {
                 "columns": columns,
                 "rows": rows,
                 "branch_map": branch_map,
+                "ancestor_map": ancestor_map,
                 "snapshots_raw": snapshots,
             }
 
@@ -796,6 +910,17 @@ class TableDetailScreen(Screen):
             logger.error(f"Branches error traceback: {traceback.format_exc()}")
             return {"error": f"Failed to load branches: {str(e)}"}
     
+    def on_snapshot_graph_node_clicked(self, event: SnapshotGraph.NodeClicked) -> None:
+        """Show a detail popup when a DAG node is clicked."""
+        snapshots = self._snapshots_raw  # newest-first
+        idx = event.row_index
+        if 0 <= idx < len(snapshots):
+            snap = snapshots[idx]
+            sid = str(snap.get("snapshot_id", ""))
+            branch_names = self._branch_map.get(sid, [])
+            ancestor_names = self._ancestor_map.get(sid, [])
+            self.app.push_screen(SnapshotDetailModal(snap, branch_names, ancestor_names))
+
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Handle row highlight events across all tables."""
         # Branches list: highlight corresponding node in the DAG graph
