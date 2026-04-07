@@ -54,6 +54,11 @@ class TUIApp(App):
         padding: 0 1;
     }
 
+    #schema-selector {
+        height: 3;
+        width: 45;
+    }
+
     #schema-partition-specs {
         height: 10;
         border-top: solid $boost;

@@ -20,15 +20,21 @@ class FilterableDataTable(DataTable):
         self._highlighted_row_indices: Set[int] = set()
         self.cursor_type = "row"
         
-    def set_data(self, columns: List[str], rows: List[Dict[str, Any]]) -> None:
+    def set_data(
+        self,
+        columns: List[str],
+        rows: List[Dict[str, Any]],
+        column_widths: Optional[Dict[str, int]] = None,
+    ) -> None:
         """Set the data for the table."""
         self._all_rows = rows.copy()
         self.clear(columns=True)  # Clear both rows and columns
-        
-        # Add columns
+
+        # Add columns, optionally with explicit widths to avoid Rich Text sizing issues
         for col in columns:
-            self.add_column(col, key=col)
-        
+            width = column_widths.get(col) if column_widths else None
+            self.add_column(col, key=col, width=width)
+
         # Apply current filter
         self.apply_filter()
     

@@ -141,30 +141,82 @@ def list_tables_metadata(cat: Catalog, namespace: str) -> List[Dict[str, Any]]:
     return results
 
 
-def get_table_schema(cat: Catalog, table_name: str) -> Dict[str, Any]:
-    """Get table schema information including columns and types."""
-    from pyiceberg.catalog import load_catalog  # local import for tests
-    
-    props = _build_pyiceberg_properties(cat)
-    ice_catalog = load_catalog(cat.name, **props)
-    
-    table = ice_catalog.load_table(table_name)
-    schema = table.schema()
-    
-    columns = []
-    for field in schema.fields:
-        columns.append({
+def _schema_to_columns(schema: Any) -> List[Dict[str, Any]]:
+    """Convert a PyIceberg Schema to a list of column dicts."""
+    return [
+        {
             "id": field.field_id,
             "name": field.name,
             "type": str(field.field_type),
             "optional": not field.required,
             "comment": getattr(field, "doc", None),
+        }
+        for field in schema.fields
+    ]
+
+
+def get_table_schema(cat: Catalog, table_name: str) -> Dict[str, Any]:
+    """Get table schema information including columns and types."""
+    from datetime import datetime, timezone
+    from pyiceberg.catalog import load_catalog  # local import for tests
+
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+
+    table = ice_catalog.load_table(table_name)
+    schema = table.schema()
+    metadata = table.metadata
+    current_id = getattr(metadata, "current_schema_id", schema.schema_id)
+
+    # Map each schema_id to the earliest snapshot timestamp that used it
+    schema_first_used: Dict[int, int] = {}
+    for snapshot in getattr(metadata, "snapshots", []):
+        snap_schema_id = getattr(snapshot, "schema_id", None)
+        ts_ms = getattr(snapshot, "timestamp_ms", None)
+        if snap_schema_id is not None and ts_ms is not None:
+            if snap_schema_id not in schema_first_used or ts_ms < schema_first_used[snap_schema_id]:
+                schema_first_used[snap_schema_id] = int(ts_ms)
+
+    available_schemas = []
+    for s in getattr(metadata, "schemas", []):
+        sid = s.schema_id
+        first_ts = schema_first_used.get(sid)
+        date_str = None
+        if first_ts is not None:
+            date_str = (
+                datetime.fromtimestamp(first_ts / 1000, tz=timezone.utc)
+                .strftime("%Y-%m-%d")
+            )
+        available_schemas.append({
+            "schema_id": sid,
+            "is_current": sid == current_id,
+            "first_used_date": date_str,
         })
 
     return {
         "table": table_name,
         "schema_id": schema.schema_id,
-        "columns": columns,
+        "columns": _schema_to_columns(schema),
+        "available_schemas": available_schemas,
+    }
+
+
+def get_schema_by_id(cat: Catalog, table_name: str, schema_id: int) -> Dict[str, Any]:
+    """Fetch fields for a specific historical schema version."""
+    from pyiceberg.catalog import load_catalog
+
+    props = _build_pyiceberg_properties(cat)
+    ice_catalog = load_catalog(cat.name, **props)
+    table = ice_catalog.load_table(table_name)
+    metadata = table.metadata
+
+    schema = metadata.schema_by_id(schema_id)
+    if schema is None:
+        return {"error": f"Schema {schema_id} not found"}
+
+    return {
+        "schema_id": schema_id,
+        "columns": _schema_to_columns(schema),
     }
 
 

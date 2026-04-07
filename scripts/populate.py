@@ -786,8 +786,8 @@ def create_and_populate_standings_table(catalog):
         pa.field("division", pa.string(), nullable=False),
     ])
 
-    def to_pa_table(rows):
-        return pa.Table.from_arrays([
+    def to_pa_table(rows, include_games_back=False, include_wild_card_rank=False):
+        arrays = [
             pa.array([s[0] for s in rows]),  # team_id
             pa.array([s[1] for s in rows]),  # season
             pa.array([s[2] for s in rows]),  # wins
@@ -795,27 +795,53 @@ def create_and_populate_standings_table(catalog):
             pa.array([s[4] for s in rows]),  # division_rank
             pa.array([s[5] for s in rows]),  # league
             pa.array([s[6] for s in rows]),  # division
-        ], schema=pa_schema)
+        ]
+        fields = list(pa_schema)
+        if include_games_back:
+            arrays.append(pa.array([round(random.uniform(0.0, 20.0), 1) for _ in rows], type=pa.float32()))
+            fields.append(pa.field("games_back", pa.float32(), nullable=True))
+        if include_wild_card_rank:
+            arrays.append(pa.array([random.randint(1, 10) for _ in rows], type=pa.int32()))
+            fields.append(pa.field("wild_card_rank", pa.int32(), nullable=True))
+        return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
-    # Write 2022 data under spec_0 (league only)
+    # Write 2022 data under schema_0, spec_0 (league only)
     data_2022 = [s for s in standings_data if s[1] == 2022]
     table.overwrite(to_pa_table(data_2022))
-    logger.info(f"Wrote {len(data_2022)} rows under spec_0 (league)")
+    logger.info(f"Wrote {len(data_2022)} rows under schema_0 / spec_0 (league)")
 
-    # Evolve partition spec: add season → creates spec_1 (league + season)
+    # Evolve partition spec: add season → spec_1 (league + season)
     with table.update_spec() as update:
         update.add_field("season", IdentityTransform(), partition_field_name="season")
     logger.info("Evolved partition spec to spec_1 (league + season)")
 
-    # Write 2023 data under spec_1
-    data_2023 = [s for s in standings_data if s[1] == 2023]
-    table.append(to_pa_table(data_2023))
-    logger.info(f"Wrote {len(data_2023)} rows under spec_1 (league + season)")
+    # Evolve schema: add games_back → schema_1
+    from pyiceberg.types import FloatType as IceFloatType
+    with table.update_schema() as update:
+        update.add_column("games_back", IceFloatType(), doc="Games behind division leader")
+    logger.info("Evolved schema to schema_1 (+ games_back)")
 
-    # Write 2024 data under spec_1
+    # Write 2023 data under schema_1, spec_1
+    data_2023 = [s for s in standings_data if s[1] == 2023]
+    table.append(to_pa_table(data_2023, include_games_back=True))
+    logger.info(f"Wrote {len(data_2023)} rows under schema_1 / spec_1 (league + season)")
+
+    # Evolve partition spec: add games_back → spec_2 (league + season + games_back)
+    # NOTE: spec_2 references games_back which only exists in schema_1+
+    with table.update_spec() as update:
+        update.add_field("games_back", IdentityTransform(), partition_field_name="games_back")
+    logger.info("Evolved partition spec to spec_2 (league + season + games_back)")
+
+    # Evolve schema: add wild_card_rank → schema_2
+    from pyiceberg.types import IntegerType as IceIntType
+    with table.update_schema() as update:
+        update.add_column("wild_card_rank", IceIntType(), doc="Wild card position")
+    logger.info("Evolved schema to schema_2 (+ wild_card_rank)")
+
+    # Write 2024 data under schema_2, spec_2
     data_2024 = [s for s in standings_data if s[1] == 2024]
-    table.append(to_pa_table(data_2024))
-    logger.info(f"Wrote {len(data_2024)} rows under spec_1 (league + season)")
+    table.append(to_pa_table(data_2024, include_games_back=True, include_wild_card_rank=True))
+    logger.info(f"Wrote {len(data_2024)} rows under schema_2 / spec_2 (league + season + games_back)")
 
     logger.info(f"Populated analytics.standings with {len(standings_data)} records across 2 partition specs")
 

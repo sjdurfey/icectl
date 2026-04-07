@@ -5,7 +5,7 @@ import logging
 
 from textual.screen import Screen
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable
+from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable, Select
 from textual.binding import Binding
 from textual.message import Message
 from textual.worker import Worker, WorkerState
@@ -40,7 +40,8 @@ class TableDetailScreen(Screen):
         self.sample_table: Optional[FilterableDataTable] = None
         self.snapshots_table: Optional[FilterableDataTable] = None
         self.branches_table: Optional[FilterableDataTable] = None
-        self.partition_specs_content: Optional[Static] = None
+        self.schema_selector: Optional[Select] = None
+        self._all_partition_spec_rows: list = []  # cached for schema-filtered re-render
         
     def compose(self):
         """Compose the screen layout."""
@@ -51,6 +52,7 @@ class TableDetailScreen(Screen):
             with TabbedContent(initial="schema"):
                 with TabPane("Schema", id="schema"):
                     with Vertical():
+                        yield Select([], id="schema-selector", prompt="Loading schemas...")
                         yield FilterableDataTable(id="schema-table")
                         yield Static("Partition Specs", id="partition-specs-label", classes="section-label")
                         yield FilterableDataTable(id="schema-partition-specs")
@@ -77,6 +79,7 @@ class TableDetailScreen(Screen):
         self.snapshots_table = self.query_one("#snapshots-table", FilterableDataTable)
         self.branches_table = self.query_one("#branches-table", FilterableDataTable)
         self.schema_partition_specs = self.query_one("#schema-partition-specs", FilterableDataTable)
+        self.schema_selector = self.query_one("#schema-selector", Select)
 
         # Focus the first table by default
         self.schema_table.focus()
@@ -134,11 +137,18 @@ class TableDetailScreen(Screen):
                     "TYPE": col.get("type", ""),
                     "NULLABLE": "optional" if col.get("optional", True) else "required",
                     "COMMENT": col.get("comment") or "—",
-                    "_field_id": col.get("id"),  # not displayed, used for spec cross-link
+                    "_field_id": col.get("id"),
+                    "_schema_id": schema_info.get("schema_id"),
                 })
             
             logger.info(f"Loaded schema with {len(rows)} columns")
-            return {"columns": columns, "rows": rows}
+            return {
+                "columns": columns,
+                "rows": rows,
+                "schema_id": schema_info.get("schema_id"),
+                "available_schemas": schema_info.get("available_schemas", []),
+                "field_ids": {col.get("id") for col in schema_info.get("columns", []) if col.get("id") is not None},
+            }
             
         except Exception as e:
             import traceback
@@ -156,6 +166,48 @@ class TableDetailScreen(Screen):
                     self.schema_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
                 else:
                     self.schema_table.set_data(result["columns"], result["rows"])
+                    # Populate schema version selector
+                    available = result.get("available_schemas", [])
+                    if len(available) > 1:
+                        def _schema_label(s: Dict[str, Any]) -> str:
+                            sid = s["schema_id"]
+                            date = s.get("first_used_date")
+                            label = f"Schema {sid}"
+                            if date:
+                                label += f" ({date})"
+                            if s["is_current"]:
+                                label += " ★"
+                            return label
+
+                        options = [(_schema_label(s), s["schema_id"]) for s in available]
+                        self.schema_selector.set_options(options)
+                        self.schema_selector.value = result.get("schema_id", Select.BLANK)
+                    else:
+                        self.schema_selector.set_options([])
+                    # Filter partition specs for the current schema's fields
+                    if self._all_partition_spec_rows:
+                        self._apply_partition_spec_filter(result.get("field_ids", set()))
+
+            elif event.worker.name == "partition_specs":
+                if "error" in result:
+                    self.schema_partition_specs.set_data(["ERROR"], [{"ERROR": result["error"]}])
+                else:
+                    self._all_partition_spec_rows = result["rows"]
+                    # Get field IDs from schema table if already loaded, else show all specs
+                    field_ids = {
+                        row.get("_field_id")
+                        for row in self.schema_table._filtered_rows
+                        if row.get("_field_id") is not None
+                    }
+                    if field_ids:
+                        self._apply_partition_spec_filter(field_ids)
+                    else:
+                        # Schema not ready yet — show unfiltered; schema handler will re-filter
+                        self.schema_partition_specs.set_data(
+                            ["SPEC", "FIELD", "TRANSFORM"],
+                            result["rows"],
+                            column_widths={"SPEC": 28, "FIELD": 22, "TRANSFORM": 15},
+                        )
                     
             elif event.worker.name == "sample":
                 if "error" in result:
@@ -181,15 +233,22 @@ class TableDetailScreen(Screen):
                 else:
                     self.branches_table.set_data(result["columns"], result["rows"])
 
-            elif event.worker.name == "partition_specs":
+            elif event.worker.name.startswith("schema_"):
                 if "error" in result:
-                    self.schema_partition_specs.set_data(["ERROR"], [{"ERROR": result["error"]}])
+                    self.schema_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
                 else:
-                    self.schema_partition_specs.set_data(result["columns"], result["rows"])
+                    self.schema_table.set_data(result["columns"], result["rows"])
+                    # Re-filter partition specs for the newly selected schema
+                    field_ids = {
+                        row.get("_field_id")
+                        for row in self.schema_table._filtered_rows
+                        if row.get("_field_id") is not None
+                    }
+                    self._apply_partition_spec_filter(field_ids)
 
         elif event.state == WorkerState.ERROR:
             error_msg = f"Worker failed: {str(event.worker.error)}"
-            if event.worker.name == "schema":
+            if event.worker.name in ("schema",) or event.worker.name.startswith("schema_"):
                 self.schema_table.set_data(["ERROR"], [{"ERROR": error_msg}])
             elif event.worker.name == "sample":
                 self.sample_table.set_data(["ERROR"], [{"ERROR": error_msg}])
@@ -201,6 +260,92 @@ class TableDetailScreen(Screen):
                 self.branches_table.set_data(["ERROR"], [{"ERROR": error_msg}])
             elif event.worker.name == "partition_specs":
                 self.schema_partition_specs.set_data(["ERROR"], [{"ERROR": error_msg}])
+
+    def _apply_partition_spec_filter(self, schema_field_ids: set) -> None:
+        """Re-render partition specs showing only those compatible with the given field IDs."""
+        if not self._all_partition_spec_rows:
+            return
+
+        # Determine which spec IDs are fully compatible (all source_ids present in schema)
+        spec_source_ids: Dict[str, set] = {}
+        for row in self._all_partition_spec_rows:
+            if row.get("_is_header"):
+                spec_source_ids.setdefault(row.get("_spec_id", ""), set())
+            else:
+                sid = row.get("_source_id")
+                spec_id = row.get("_spec_id", "")
+                spec_source_ids.setdefault(spec_id, set())
+                if sid is not None:
+                    spec_source_ids[spec_id].add(int(sid))
+
+        compatible_spec_ids = {
+            spec_id
+            for spec_id, source_ids in spec_source_ids.items()
+            if source_ids <= schema_field_ids
+        }
+
+        filtered = [
+            row for row in self._all_partition_spec_rows
+            if row.get("_spec_id") in compatible_spec_ids
+        ]
+        self.schema_partition_specs.set_data(
+            ["SPEC", "FIELD", "TRANSFORM"],
+            filtered,
+            column_widths={"SPEC": 28, "FIELD": 22, "TRANSFORM": 15},
+        )
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Handle schema version selection."""
+        if event.select.id != "schema-selector":
+            return
+        schema_id = event.value
+        if schema_id is Select.BLANK:
+            return
+        # Skip if already showing this schema
+        displayed_rows = self.schema_table._filtered_rows
+        if displayed_rows and displayed_rows[0].get("_schema_id") == schema_id:
+            return
+        self.schema_table.set_data(["LOADING"], [{"LOADING": f"Loading schema {schema_id}..."}])
+        self.run_worker(
+            lambda sid=schema_id: self._fetch_schema_by_id_worker(sid),
+            name=f"schema_{schema_id}",
+            thread=True,
+        )
+
+    def _fetch_schema_by_id_worker(self, schema_id: int) -> Dict[str, Any]:
+        """Load a specific schema version on demand."""
+        try:
+            config = getattr(self.app, 'config', None)
+            if not config:
+                return {"error": "App config not yet loaded"}
+            catalog_config = config.catalogs.get(self.catalog_name)
+            if not catalog_config:
+                return {"error": f"Catalog '{self.catalog_name}' not found in config"}
+
+            logger.info(f"Loading schema {schema_id} for '{self.full_table_name}'")
+            result = clients.get_schema_by_id(catalog_config, self.full_table_name, schema_id)
+            if "error" in result:
+                return result
+
+            columns = ["COLUMN", "TYPE", "NULLABLE", "COMMENT"]
+            rows = [
+                {
+                    "COLUMN": col.get("name", ""),
+                    "TYPE": col.get("type", ""),
+                    "NULLABLE": "optional" if col.get("optional", True) else "required",
+                    "COMMENT": col.get("comment") or "—",
+                    "_field_id": col.get("id"),
+                    "_schema_id": schema_id,
+                }
+                for col in result["columns"]
+            ]
+            return {"columns": columns, "rows": rows}
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to load schema {schema_id}: {e}")
+            logger.error(traceback.format_exc())
+            return {"error": f"Failed to load schema {schema_id}: {str(e)}"}
 
     def load_partition_specs_worker(self) -> Dict[str, Any]:
         """Load partition spec history in background worker."""
@@ -243,6 +388,7 @@ class TableDetailScreen(Screen):
                     "_is_header": True,
                     "_source_id": None,
                     "_is_active": is_active,
+                    "_spec_id": spec_id,
                 })
 
                 # Field rows
@@ -255,6 +401,7 @@ class TableDetailScreen(Screen):
                         "_is_header": False,
                         "_source_id": f["source_id"],
                         "_is_active": is_active,
+                        "_spec_id": spec_id,
                     })
 
             logger.info(f"Loaded partition specs: {len(grouped)} spec(s)")
