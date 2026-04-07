@@ -838,41 +838,80 @@ def create_and_populate_standings_table(catalog):
         update.add_column("wild_card_rank", IceIntType(), doc="Wild card position")
     logger.info("Evolved schema to schema_2 (+ wild_card_rank)")
 
-    # Write 2024 data under schema_2, spec_2
+    # Write 2024 data under schema_2, spec_2 — this is the "main" release commit
     data_2024 = [s for s in standings_data if s[1] == 2024]
     table.append(to_pa_table(data_2024, include_games_back=True, include_wild_card_rank=True))
-    logger.info(f"Wrote {len(data_2024)} rows under schema_2 / spec_2 (league + season + games_back)")
+    logger.info(f"Wrote {len(data_2024)} rows under schema_2 / spec_2 (main branch)")
 
-    # Refresh to get the full snapshot history
+    # ── Branching ────────────────────────────────────────────────────────────
+    # PyIceberg 0.9.1 only supports writes to the main branch. To create a true
+    # forking snapshot history we temporarily repoint main to an earlier snapshot,
+    # write the dev commits (which adopt that earlier snapshot as their parent),
+    # then restore main and write the merge commit.
+    #
+    # Desired DAG (newest first):
+    #   * [main]       S6  ← merge commit, parent=S3
+    #   |
+    #   o              S3  ← 2024 append, tag:v2024-release
+    #   | o  [dev]     S5  ← dev commit 2, parent=S4
+    #   | |
+    #   | o            S4  ← dev commit 1, parent=S2
+    #   |/
+    #   o              S2  ← 2023 append
+    #   |
+    #   o  [tag:v2022] S1  ← initial 2022 write
+
     table.refresh()
-    snapshots = sorted(table.metadata.snapshots, key=lambda s: s.timestamp_ms)
-    # snapshots[0] = first write (2022, schema_0/spec_0)
-    # snapshots[1] = spec evolution (no data)  or 2023 write — find by index safely
-    snap_ids = [s.snapshot_id for s in snapshots]
-    logger.info(f"Snapshot history: {snap_ids}")
+    snapshots_sorted = sorted(table.metadata.snapshots, key=lambda s: s.timestamp_ms)
+    S1_id = snapshots_sorted[0].snapshot_id  # 2022 overwrite
+    S2_id = snapshots_sorted[1].snapshot_id  # 2023 append
+    S3_id = snapshots_sorted[2].snapshot_id  # 2024 append (current HEAD)
+    logger.info(f"Linear history so far: S1={S1_id} S2={S2_id} S3={S3_id}")
 
-    # Tag the first release and create a dev branch from mid-history
-    # snap_ids[0] = after initial 2022 write
-    # snap_ids[-3 or so] = after 2023 write (before spec_2 / schema_2 evolution)
-    # snap_ids[-1] = current HEAD (after 2024 write)
-    if len(snap_ids) >= 2:
-        with table.manage_snapshots() as ms:
-            # Tag the initial 2022 snapshot as a stable release baseline
-            ms.create_tag(snap_ids[0], "v2022-baseline")
-            logger.info(f"Created tag v2022-baseline → {snap_ids[0]}")
+    # Temporarily move main back to S2 so the next appends fork from there
+    with table.manage_snapshots() as ms:
+        ms.create_branch(S2_id, "main")
+    table.refresh()
+    logger.info("Moved main → S2 temporarily to create fork")
 
-            # Create a dev branch pointing to the snapshot just before the 2024 write
-            # (i.e. the state after 2023 data was written)
-            dev_snap = snap_ids[-2] if len(snap_ids) >= 2 else snap_ids[-1]
-            ms.create_branch(dev_snap, "dev")
-            logger.info(f"Created branch dev → {dev_snap}")
+    # Dev commit 1: parent will be S2 (current HEAD)
+    dev_al_east = [s for s in standings_data if s[5] == "AL" and s[6] == "East" and s[1] == 2023]
+    table.append(to_pa_table(dev_al_east, include_games_back=True, include_wild_card_rank=True))
+    table.refresh()
+    S4_id = table.metadata.current_snapshot_id
+    logger.info(f"Dev commit 1 (S4={S4_id}, parent=S2): AL East 2023 corrections")
 
-            # Create an experimental branch from the very first snapshot
-            ms.create_branch(snap_ids[0], "experimental")
-            logger.info(f"Created branch experimental → {snap_ids[0]}")
+    # Dev commit 2: parent will be S4
+    dev_nl_west = [s for s in standings_data if s[5] == "NL" and s[6] == "West" and s[1] == 2023]
+    table.append(to_pa_table(dev_nl_west, include_games_back=True, include_wild_card_rank=True))
+    table.refresh()
+    S5_id = table.metadata.current_snapshot_id
+    logger.info(f"Dev commit 2 (S5={S5_id}, parent=S4): NL West 2023 corrections")
 
-    logger.info(f"Populated analytics.standings with {len(standings_data)} records, "
-                f"{len(snap_ids)} snapshots, and named branches")
+    # Restore main to S3 and create dev branch pointing at S5
+    with table.manage_snapshots() as ms:
+        ms.create_branch(S3_id, "main")
+        ms.create_branch(S5_id, "dev")
+    table.refresh()
+    logger.info(f"Restored main → S3, created dev → S5")
+
+    # Merge commit: main is back at S3, so parent will be S3
+    merge_rows = [s for s in standings_data if s[1] == 2024 and s[5] == "AL"]
+    table.append(to_pa_table(merge_rows, include_games_back=True, include_wild_card_rank=True))
+    table.refresh()
+    S6_id = table.metadata.current_snapshot_id
+    logger.info(f"Merge commit (S6={S6_id}, parent=S3): merged dev into main")
+
+    # Final tags
+    with table.manage_snapshots() as ms:
+        ms.create_tag(S1_id, "v2022-baseline")
+        ms.create_tag(S3_id, "v2024-release")
+    logger.info("Created tags v2022-baseline and v2024-release")
+
+    logger.info(
+        f"Populated analytics.standings with {len(standings_data)} records, "
+        f"6 snapshots, branching DAG (main: S1→S2→S3→S6, dev: S2→S4→S5)"
+    )
 
 
 @click.command()
