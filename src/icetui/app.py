@@ -63,6 +63,25 @@ class TUIApp(App):
         height: 10;
         border-top: solid $boost;
     }
+
+    #snapshots-split {
+        height: 1fr;
+    }
+
+    #snapshots-list-pane {
+        width: 55%;
+        border-right: solid $boost;
+    }
+
+    #snapshots-graph-pane {
+        width: 45%;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    #snapshot-dag {
+        width: auto;
+    }
     """
     
     def __init__(self):

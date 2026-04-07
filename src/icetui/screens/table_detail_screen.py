@@ -1,10 +1,10 @@
 """Table details screen showing schema and sample data."""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 import logging
 
 from textual.screen import Screen
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable, Select
 from textual.binding import Binding
 from textual.message import Message
@@ -42,6 +42,9 @@ class TableDetailScreen(Screen):
         self.branches_table: Optional[FilterableDataTable] = None
         self.schema_selector: Optional[Select] = None
         self._all_partition_spec_rows: list = []  # cached for schema-filtered re-render
+        self._branch_map: Dict[str, List[str]] = {}  # snapshot_id → [ref_names]
+        self._snapshots_raw: List[Dict] = []          # raw snapshot dicts (newest-first)
+        self.snapshot_graph_widget: Optional[Static] = None
         
     def compose(self):
         """Compose the screen layout."""
@@ -64,7 +67,11 @@ class TableDetailScreen(Screen):
                     yield FilterableDataTable(id="properties-table")
 
                 with TabPane("Snapshots", id="snapshots"):
-                    yield FilterableDataTable(id="snapshots-table")
+                    with Horizontal(id="snapshots-split"):
+                        with Vertical(id="snapshots-list-pane"):
+                            yield FilterableDataTable(id="snapshots-table")
+                        with VerticalScroll(id="snapshots-graph-pane"):
+                            yield Static("", id="snapshot-dag", markup=False)
 
                 with TabPane("Branches", id="branches"):
                     yield FilterableDataTable(id="branches-table")
@@ -80,6 +87,7 @@ class TableDetailScreen(Screen):
         self.branches_table = self.query_one("#branches-table", FilterableDataTable)
         self.schema_partition_specs = self.query_one("#schema-partition-specs", FilterableDataTable)
         self.schema_selector = self.query_one("#schema-selector", Select)
+        self.snapshot_graph_widget = self.query_one("#snapshot-dag", Static)
 
         # Focus the first table by default
         self.schema_table.focus()
@@ -225,7 +233,18 @@ class TableDetailScreen(Screen):
                 if "error" in result:
                     self.snapshots_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
                 else:
-                    self.snapshots_table.set_data(result["columns"], result["rows"])
+                    self._branch_map = result["branch_map"]
+                    self._snapshots_raw = result["snapshots_raw"]
+                    self.snapshots_table.set_data(
+                        result["columns"],
+                        result["rows"],
+                        column_widths={
+                            "SNAPSHOT_ID": 20, "PARENT_ID": 20, "TIMESTAMP": 22,
+                            "OPERATION": 11, "TOTAL_RECORDS": 14,
+                            "IS_CURRENT": 10, "BRANCHES": 20,
+                        },
+                    )
+                    self._render_snapshot_graph(selected_snapshot_id=None)
                     
             elif event.worker.name == "branches":
                 if "error" in result:
@@ -346,6 +365,139 @@ class TableDetailScreen(Screen):
             logger.error(f"Failed to load schema {schema_id}: {e}")
             logger.error(traceback.format_exc())
             return {"error": f"Failed to load schema {schema_id}: {str(e)}"}
+
+    def _render_snapshot_graph(self, selected_snapshot_id: Optional[str]) -> None:
+        """Render ASCII DAG of snapshot history into the graph Static widget."""
+        from rich.text import Text
+
+        if self.snapshot_graph_widget is None:
+            return
+
+        if not self._snapshots_raw:
+            self.snapshot_graph_widget.update(Text("No snapshots", style="dim"))
+            return
+
+        snapshots = self._snapshots_raw  # newest-first
+        ordered_old_first = list(reversed(snapshots))
+
+        # Build parent → [children] adjacency (in time order, oldest child first)
+        children: Dict[str, List[str]] = {}
+        for snap in ordered_old_first:
+            pid = snap.get("parent_id", "—")
+            sid = snap.get("snapshot_id", "")
+            if pid and pid != "—":
+                children.setdefault(pid, []).append(sid)
+
+        # Assign display lanes (topological, left-to-right for forks)
+        lanes: List[Optional[str]] = []
+        snap_lane: Dict[str, int] = {}
+
+        def first_free(start: int = 0) -> int:
+            for i in range(start, len(lanes)):
+                if lanes[i] is None:
+                    return i
+            lanes.append(None)
+            return len(lanes) - 1
+
+        for snap in ordered_old_first:
+            sid = snap.get("snapshot_id", "")
+            pid = snap.get("parent_id", "—")
+            if pid == "—":
+                pid = None
+            snap_children = children.get(pid, []) if pid else []
+
+            if pid is None or pid not in snap_lane:
+                idx = first_free()
+            elif snap_children and snap_children[0] == sid:
+                idx = snap_lane[pid]  # first child inherits parent's lane
+            else:
+                idx = first_free(snap_lane[pid] + 1)  # branch: new lane to the right
+
+            lanes[idx] = sid
+            snap_lane[sid] = idx
+
+            # Free parent lane once its last child has been placed
+            if pid and snap_children and snap_children[-1] == sid:
+                parent_lane_idx = snap_lane.get(pid)
+                if parent_lane_idx is not None:
+                    lanes[parent_lane_idx] = None
+
+        num_lanes = max(snap_lane.values(), default=0) + 1
+
+        # Compute display row indices (newest-first)
+        row_index_map = {snap.get("snapshot_id", ""): i for i, snap in enumerate(snapshots)}
+
+        # Compute lane_active_until[lane] = last connector row_index that needs a pipe.
+        # A lane is active at the connector after row R if a node in that lane at row <= R
+        # has a same-lane parent at row > R.  For node at row r with same-lane parent at
+        # row p, the last active connector is after row p-1, so we store p-1.
+        lane_active_until: Dict[int, int] = {}
+        for snap in snapshots:
+            sid = snap.get("snapshot_id", "")
+            lane = snap_lane.get(sid, 0)
+            pid = snap.get("parent_id", "—")
+            if pid and pid != "—" and pid in snap_lane and snap_lane[pid] == lane:
+                parent_row = row_index_map.get(pid, 0)
+                lane_active_until[lane] = max(lane_active_until.get(lane, -1), parent_row - 1)
+
+        # Render: one node row + one connector row per snapshot (except last)
+        result = Text()
+        for row_i, snap in enumerate(snapshots):
+            sid = snap.get("snapshot_id", "")
+            lane = snap_lane.get(sid, 0)
+            is_selected = sid == selected_snapshot_id
+            is_current = snap.get("is_current", False)
+            branch_names = self._branch_map.get(sid, [])
+
+            # Node symbol and style
+            if is_selected:
+                node_char, node_style = ">", "bold bright_yellow"
+            elif is_current:
+                node_char, node_style = "*", "bold green"
+            else:
+                node_char, node_style = "o", "cyan"
+
+            # Build node row: pipes for active lanes, node symbol for this lane
+            line = Text()
+            for li in range(num_lanes):
+                if li == lane:
+                    line.append(node_char, style=node_style)
+                elif li in lane_active_until and lane_active_until[li] >= row_i:
+                    line.append("|", style="dim white")
+                else:
+                    line.append(" ")
+                if li < num_lanes - 1:
+                    line.append(" ")
+
+            # Label: prefer branch/tag names, fall back to short snapshot ID
+            if branch_names:
+                label_style = "bold bright_cyan" if is_current else "bright_cyan"
+                line.append("  ")
+                for i, name in enumerate(branch_names):
+                    if i:
+                        line.append(" ", style="default")
+                    line.append(f"[{name}]", style=label_style)
+            else:
+                short_id = sid[-10:] if len(sid) >= 10 else sid
+                line.append(f"  {short_id}", style=node_style)
+
+            result.append_text(line)
+
+            # Connector row (pipes only) between nodes
+            if row_i < len(snapshots) - 1:
+                result.append("\n")
+                connector = Text()
+                for li in range(num_lanes):
+                    if li in lane_active_until and lane_active_until[li] >= row_i:
+                        connector.append("|", style="dim white")
+                    else:
+                        connector.append(" ")
+                    if li < num_lanes - 1:
+                        connector.append(" ")
+                result.append_text(connector)
+                result.append("\n")
+
+        self.snapshot_graph_widget.update(result)
 
     def load_partition_specs_worker(self) -> Dict[str, Any]:
         """Load partition spec history in background worker."""
@@ -508,42 +660,60 @@ class TableDetailScreen(Screen):
             return {"error": f"Failed to load properties: {str(e)}"}
     
     def load_snapshots_data_worker(self) -> Dict[str, Any]:
-        """Load table snapshots in background worker."""
+        """Load table snapshots and branch refs in background worker."""
         try:
-            # Get config from app
             config = getattr(self.app, 'config', None)
             if not config:
                 return {"error": "App config not yet loaded"}
-                
-            # Get the catalog configuration
             catalog_config = config.catalogs.get(self.catalog_name)
             if not catalog_config:
                 return {"error": f"Catalog '{self.catalog_name}' not found in config"}
-            
-            # Load snapshots
+
             logger.info(f"Loading snapshots for table '{self.full_table_name}'")
             snapshots = clients.get_table_snapshots(catalog_config, self.full_table_name)
-            
-            columns = ["SNAPSHOT_ID", "PARENT_ID", "TIMESTAMP", "OPERATION", "TOTAL_RECORDS", "IS_CURRENT"]
+            branches = clients.get_table_branches(catalog_config, self.full_table_name)
+
+            # Build snapshot_id → [ref_names] map; current branch first
+            branch_map: Dict[str, List[str]] = {}
+            for ref in branches:
+                sid = ref["snapshot_id"]
+                name = f"tag:{ref['name']}" if ref.get("type") == "tag" else ref["name"]
+                bucket = branch_map.setdefault(sid, [])
+                if ref.get("is_current"):
+                    bucket.insert(0, name)
+                else:
+                    bucket.append(name)
+
+            columns = ["SNAPSHOT_ID", "PARENT_ID", "TIMESTAMP", "OPERATION",
+                       "TOTAL_RECORDS", "IS_CURRENT", "BRANCHES"]
             rows = []
-            
-            for snapshot in snapshots:
+            for snap in snapshots:
+                sid = snap.get("snapshot_id", "—")
+                branch_names = branch_map.get(sid, [])
                 rows.append({
-                    "SNAPSHOT_ID": snapshot.get("snapshot_id", "—"),
-                    "PARENT_ID": snapshot.get("parent_id", "—"),
-                    "TIMESTAMP": snapshot.get("timestamp", "—"),
-                    "OPERATION": snapshot.get("operation", "—"),
-                    "TOTAL_RECORDS": str(snapshot.get("total_records", "—")),
-                    "IS_CURRENT": "Yes" if snapshot.get("is_current", False) else "No"
+                    "SNAPSHOT_ID": sid,
+                    "PARENT_ID": snap.get("parent_id", "—"),
+                    "TIMESTAMP": snap.get("timestamp", "—"),
+                    "OPERATION": snap.get("operation", "—"),
+                    "TOTAL_RECORDS": str(snap.get("total_records", "—")),
+                    "IS_CURRENT": "Yes" if snap.get("is_current", False) else "No",
+                    "BRANCHES": ", ".join(branch_names) if branch_names else "—",
+                    "_snapshot_id": sid,
+                    "_branch_names": branch_names,
                 })
-            
-            logger.info(f"Loaded {len(rows)} snapshots")
-            return {"columns": columns, "rows": rows}
-            
+
+            logger.info(f"Loaded {len(rows)} snapshots, {len(branch_map)} refs")
+            return {
+                "columns": columns,
+                "rows": rows,
+                "branch_map": branch_map,
+                "snapshots_raw": snapshots,
+            }
+
         except Exception as e:
             import traceback
             logger.error(f"Failed to load snapshots for table '{self.full_table_name}': {e}")
-            logger.error(f"Snapshots error traceback: {traceback.format_exc()}")
+            logger.error(traceback.format_exc())
             return {"error": f"Failed to load snapshots: {str(e)}"}
     
     def load_branches_data_worker(self) -> Dict[str, Any]:
@@ -587,6 +757,26 @@ class TableDetailScreen(Screen):
     
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Handle row highlight events across all tables."""
+        # Snapshot list: update graph highlight + parent row in table
+        if event.data_table is self.snapshots_table:
+            rows = self.snapshots_table._filtered_rows
+            row_index = event.cursor_row
+            selected_sid = None
+            if rows and row_index < len(rows):
+                selected_sid = rows[row_index].get("_snapshot_id")
+            self._render_snapshot_graph(selected_snapshot_id=selected_sid)
+
+            parent_id = rows[row_index].get("PARENT_ID", "—") if rows and row_index < len(rows) else "—"
+            if parent_id != "—":
+                parent_indices = {
+                    i for i, r in enumerate(rows)
+                    if r.get("SNAPSHOT_ID") == parent_id
+                }
+                self.snapshots_table.highlight_cells({(i, "SNAPSHOT_ID") for i in parent_indices})
+            else:
+                self.snapshots_table.highlight_cells(set())
+            return
+
         # Partition spec → schema cross-link
         if event.data_table is self.schema_partition_specs:
             rows = self.schema_partition_specs._filtered_rows
@@ -608,29 +798,6 @@ class TableDetailScreen(Screen):
                 self.schema_table.highlight_cells({(i, "COLUMN") for i in targets})
             else:
                 self.schema_table.highlight_cells(set())
-            return
-
-        # Snapshot parent highlight
-        if event.data_table is not self.snapshots_table:
-            return
-
-        rows = self.snapshots_table._filtered_rows
-        row_index = event.cursor_row
-        if not rows or row_index >= len(rows):
-            self.snapshots_table.highlight_cells(set())
-            return
-
-        parent_id = rows[row_index].get("PARENT_ID", "—")
-        if parent_id != "—":
-            parent_indices = {
-                i for i, r in enumerate(rows)
-                if r.get("SNAPSHOT_ID") == parent_id
-            }
-            self.snapshots_table.highlight_cells(
-                {(i, "SNAPSHOT_ID") for i in parent_indices}
-            )
-        else:
-            self.snapshots_table.highlight_cells(set())
 
     def action_go_back(self) -> None:
         """Handle going back."""
