@@ -28,7 +28,7 @@ build:
 	uv build
 
 install:
-	uv tool install --force .
+	uv tool install --force --no-cache .
 
 uninstall:
 	uv tool uninstall icectl || true
@@ -40,8 +40,8 @@ dist-clean:
 run:
 	ICECTL_CONFIG=infra/icectl.config.yaml REQUESTS_CA_BUNDLE=/Users/stephen/Development/git/sjdurfey/homelab/configs/ssl/ca/ca.crt $(PY) icectl $(ARGS)
 
-tui:
-	ICECTL_CONFIG=infra/icectl.config.yaml REQUESTS_CA_BUNDLE=/Users/stephen/Development/git/sjdurfey/homelab/configs/ssl/ca/ca.crt $(PY) icectl tui
+tui: install
+	ICECTL_CONFIG=infra/icectl.config.yaml REQUESTS_CA_BUNDLE=/Users/stephen/Development/git/sjdurfey/homelab/configs/ssl/ca/ca.crt $(shell uv tool dir)/iceberg-viewer/bin/icectl tui
 
 # Docker Compose infra (MinIO + Lakekeeper + Seeder)
 COMPOSE = docker-compose -f infra/docker-compose.yaml

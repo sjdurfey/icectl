@@ -150,21 +150,18 @@ class TUIApp(App):
 
 def run_tui() -> None:
     """Entry point for running the TUI."""
-    # Configure logging to file only for debugging
     import logging
-    import os
-    
+
     log_file = "/tmp/icetui_debug.log"
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, mode='w')
-        ]
-    )
-    
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(log_file, mode="w")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+    root.addHandler(fh)
+
     logger = logging.getLogger(__name__)
-    logger.info(f"Starting TUI, debug log at: {log_file}")
-    
+    logger.info("Starting TUI, debug log at: %s", log_file)
+
     app = TUIApp()
     app.run()

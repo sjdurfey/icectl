@@ -4,9 +4,8 @@
 # dependencies = [
 #     "pyiceberg>=0.9.1",
 #     "pyarrow>=21.0.0",
-#     "requests>=2.25.0",
-#     "pyyaml>=6.0",
-#     "s3fs>=2024.1.0"
+#     "s3fs>=2024.1.0",
+#     "click>=8.0"
 # ]
 # ///
 
@@ -20,17 +19,19 @@ Usage:
 """
 
 import os
-import sys
-import json
 import logging
 import random
 from datetime import datetime, timedelta, date
 from decimal import Decimal
-from typing import Dict, List, Any, Optional
 
-import requests
+import click
 import pyarrow as pa
-import yaml
+
+
+# Trust homelab CA cert for S3 HTTPS connections (FsspecFileIO uses requests/botocore)
+_HOMELAB_CA = os.path.expanduser("~/.homelab-ca.pem")
+if os.path.exists(_HOMELAB_CA) and "REQUESTS_CA_BUNDLE" not in os.environ:
+    os.environ["REQUESTS_CA_BUNDLE"] = _HOMELAB_CA
 
 
 # Configure logging
@@ -42,83 +43,43 @@ logger = logging.getLogger(__name__)
 
 # Environment setup
 LAKEKEEPER_URI = os.getenv("LAKEKEEPER_URI", "https://lakekeeper.homelab/catalog/")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 PROJECT_ID = "00000000-0000-0000-0000-000000000000"
-
-
-def detect_environment():
-    """Detect if running locally or in homelab environment."""
-    if "homelab" in LAKEKEEPER_URI:
-        logger.info("Detected homelab environment")
-        return {
-            "s3_endpoint": "http://rustfs.homelab:9090",
-            "access_key": "rustfsadmin",
-            "secret_key": "rustfsadmin123"
-        }
-    else:
-        logger.info("Detected local Docker environment")
-        return {
-            "s3_endpoint": "http://localhost:9000",
-            "access_key": "admin",
-            "secret_key": "password"
-        }
 
 
 def ensure_warehouse_exists():
     """Ensure the warehouse exists via Lakekeeper management API."""
     logger.info("Checking if warehouse exists...")
-
-    # Try to connect and verify warehouse
     try:
-        # Simple check - try to load catalog config
         from pyiceberg.catalog import load_catalog
-        env = detect_environment()
-
-        catalog = load_catalog(
+        load_catalog(
             "prod",
             uri=LAKEKEEPER_URI,
             warehouse=f"{PROJECT_ID}/warehouse",
-            **{
-                f"s3.endpoint": env["s3_endpoint"],
-                f"s3.path-style-access": True,
-                f"s3.region": AWS_REGION,
-                f"s3.access-key-id": env["access_key"],
-                f"s3.secret-access-key": env["secret_key"],
-                f"rest.ssl-verification": False
-            }
+            **{"rest.ssl-verification": False}
         )
         logger.info("Successfully connected to warehouse")
         return True
-
     except Exception as e:
         logger.error(f"Failed to connect to warehouse: {e}")
-        logger.info("Warehouse may need to be bootstrapped via Lakekeeper management API")
         return False
 
 
 def create_catalog():
     """Create PyIceberg catalog connection."""
-    env = detect_environment()
-
     from pyiceberg.catalog import load_catalog
-
-    catalog = load_catalog(
+    return load_catalog(
         "prod",
         uri=LAKEKEEPER_URI,
         warehouse=f"{PROJECT_ID}/warehouse",
         **{
-            f"s3.endpoint": env["s3_endpoint"],
-            f"s3.path-style-access": True,
-            f"s3.region": AWS_REGION,
-            f"s3.access-key-id": env["access_key"],
-            f"s3.secret-access-key": env["secret_key"],
-            f"py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO",
-            f"s3.connect-timeout": 10,
-            f"s3.request-timeout": 30,
-            f"rest.ssl-verification": False
+            "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
+            "s3.access-key-id": "rustfsadmin",
+            "s3.secret-access-key": "rustfsadmin123",
+            "s3.connect-timeout": 10,
+            "s3.request-timeout": 30,
+            "rest.ssl-verification": False,
         }
     )
-    return catalog
 
 
 def create_namespaces(catalog):
@@ -134,6 +95,22 @@ def create_namespaces(catalog):
             catalog.create_namespace(ns_tuple)
         else:
             logger.info(f"Namespace already exists: {ns_name}")
+
+
+def drop_all_data(catalog):
+    """Drop all baseball tables and namespaces."""
+    namespaces = ["teams", "players", "leagues", "analytics"]
+    existing = {tuple(ns) for ns in catalog.list_namespaces()}
+    for ns_name in namespaces:
+        ns_tuple = (ns_name,)
+        if ns_tuple not in existing:
+            logger.info(f"Namespace not found, skipping: {ns_name}")
+            continue
+        for table_id in catalog.list_tables(ns_name):
+            logger.info(f"Dropping table: {table_id}")
+            catalog.drop_table(table_id)
+        logger.info(f"Dropping namespace: {ns_name}")
+        catalog.drop_namespace(ns_tuple)
 
 
 def generate_team_data():
@@ -407,6 +384,28 @@ def generate_performance_metrics_data():
     return metrics
 
 
+def write_in_chunks(table, pa_table: pa.Table, num_chunks: int = 10) -> None:
+    """Write a PyArrow table in chunks to produce multiple snapshots."""
+    n = len(pa_table)
+    if n == 0:
+        table.overwrite(pa_table)
+        return
+
+    chunk_size = max(1, n // num_chunks)
+    offsets = list(range(0, n, chunk_size))
+
+    for batch_num, offset in enumerate(offsets):
+        length = min(chunk_size, n - offset)
+        chunk = pa_table.slice(offset, length)
+        if batch_num == 0:
+            table.overwrite(chunk)
+        else:
+            table.append(chunk)
+
+    actual_chunks = len(offsets)
+    logger.info(f"  → wrote {n} rows in {actual_chunks} snapshot(s) (~{chunk_size} rows/chunk)")
+
+
 def create_and_populate_teams_tables(catalog):
     """Create and populate teams namespace tables."""
     from pyiceberg.schema import Schema
@@ -427,9 +426,9 @@ def create_and_populate_teams_tables(catalog):
     try:
         table = catalog.create_table("teams.franchises", schema=franchises_schema)
         logger.info("Created table: teams.franchises")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"teams.franchises already exists or create failed ({e}), loading instead")
         table = catalog.load_table("teams.franchises")
-        logger.info("Table already exists: teams.franchises")
 
     # Generate and populate data
     teams_data = generate_team_data()
@@ -458,7 +457,7 @@ def create_and_populate_teams_tables(catalog):
     ]
 
     teams_table = pa.Table.from_arrays(arrays, schema=pa_schema)
-    table.overwrite(teams_table)
+    write_in_chunks(table, teams_table)
     logger.info(f"Populated teams.franchises with {len(teams_data)} records")
 
 
@@ -483,9 +482,9 @@ def create_and_populate_players_tables(catalog):
     try:
         roster_table = catalog.create_table("players.roster", schema=roster_schema)
         logger.info("Created table: players.roster")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"players.roster already exists or create failed ({e}), loading instead")
         roster_table = catalog.load_table("players.roster")
-        logger.info("Table already exists: players.roster")
 
     # Generate and populate roster data
     players_data = generate_player_data()
@@ -515,7 +514,7 @@ def create_and_populate_players_tables(catalog):
     ]
 
     roster_pa_table = pa.Table.from_arrays(roster_arrays, schema=pa_roster_schema)
-    roster_table.overwrite(roster_pa_table)
+    write_in_chunks(roster_table, roster_pa_table)
     logger.info(f"Populated players.roster with {len(players_data)} records")
 
     # Create batting_stats table
@@ -538,9 +537,9 @@ def create_and_populate_players_tables(catalog):
     try:
         batting_table = catalog.create_table("players.batting_stats", schema=batting_schema)
         logger.info("Created table: players.batting_stats")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"players.batting_stats already exists or create failed ({e}), loading instead")
         batting_table = catalog.load_table("players.batting_stats")
-        logger.info("Table already exists: players.batting_stats")
 
     # Generate and populate batting stats
     batting_data = generate_batting_stats_data()
@@ -578,7 +577,7 @@ def create_and_populate_players_tables(catalog):
     ]
 
     batting_pa_table = pa.Table.from_arrays(batting_arrays, schema=pa_batting_schema)
-    batting_table.overwrite(batting_pa_table)
+    write_in_chunks(batting_table, batting_pa_table)
     logger.info(f"Populated players.batting_stats with {len(batting_data)} records")
 
 
@@ -605,9 +604,9 @@ def create_and_populate_analytics_tables(catalog):
     try:
         game_logs_table = catalog.create_table("analytics.game_logs", schema=game_logs_schema)
         logger.info("Created table: analytics.game_logs")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"analytics.game_logs already exists or create failed ({e}), loading instead")
         game_logs_table = catalog.load_table("analytics.game_logs")
-        logger.info("Table already exists: analytics.game_logs")
 
     # Generate and populate game logs
     games_data = generate_game_logs_data()
@@ -639,7 +638,7 @@ def create_and_populate_analytics_tables(catalog):
     ]
 
     games_pa_table = pa.Table.from_arrays(games_arrays, schema=pa_games_schema)
-    game_logs_table.overwrite(games_pa_table)
+    write_in_chunks(game_logs_table, games_pa_table)
     logger.info(f"Populated analytics.game_logs with {len(games_data)} records")
 
     # Create performance_metrics table
@@ -656,9 +655,9 @@ def create_and_populate_analytics_tables(catalog):
     try:
         metrics_table = catalog.create_table("analytics.performance_metrics", schema=metrics_schema)
         logger.info("Created table: analytics.performance_metrics")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"analytics.performance_metrics already exists or create failed ({e}), loading instead")
         metrics_table = catalog.load_table("analytics.performance_metrics")
-        logger.info("Table already exists: analytics.performance_metrics")
 
     # Generate and populate performance metrics
     metrics_data = generate_performance_metrics_data()
@@ -684,28 +683,35 @@ def create_and_populate_analytics_tables(catalog):
     ]
 
     metrics_pa_table = pa.Table.from_arrays(metrics_arrays, schema=pa_metrics_schema)
-    metrics_table.overwrite(metrics_pa_table)
+    write_in_chunks(metrics_table, metrics_pa_table)
     logger.info(f"Populated analytics.performance_metrics with {len(metrics_data)} records")
 
 
-def main():
-    """Main population script."""
+@click.command()
+@click.option(
+    "--drop",
+    is_flag=True,
+    default=False,
+    help="Drop all existing baseball tables and namespaces before populating.",
+)
+def main(drop: bool) -> None:
+    """Populate Lakekeeper with baseball test data."""
     logger.info("Starting baseball data population...")
 
-    # Check warehouse connectivity
     if not ensure_warehouse_exists():
         logger.error("Cannot proceed without warehouse access")
-        return 1
+        raise SystemExit(1)
 
     try:
-        # Create catalog connection
         catalog = create_catalog()
         logger.info("Connected to catalog successfully")
 
-        # Create namespaces
+        if drop:
+            logger.info("--drop specified: removing existing data first...")
+            drop_all_data(catalog)
+
         create_namespaces(catalog)
 
-        # Create and populate tables
         logger.info("Creating and populating teams tables...")
         create_and_populate_teams_tables(catalog)
 
@@ -723,14 +729,12 @@ def main():
         logger.info("")
         logger.info("Test with: scripts/run_integration.sh")
 
-        return 0
-
     except Exception as e:
         logger.error(f"Population failed: {e}")
         import traceback
         traceback.print_exc()
-        return 1
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -35,11 +35,11 @@ WAREHOUSE_BODY = {
     "storage-profile": {
         "type": "s3",
         "bucket": "lakehouse",
-        "endpoint": "http://10.0.0.166:9090",
+        "endpoint": "http://s3.homelab/",
         "region": "us-east-1",
         "path-style-access": True,
         "flavor": "s3-compat",
-        "sts-enabled": True,
+        "sts-enabled": False,
     },
     "storage-credential": {
         "type": "s3",

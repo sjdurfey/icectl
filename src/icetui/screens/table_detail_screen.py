@@ -1,14 +1,14 @@
 """Table details screen showing schema and sample data."""
 
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 import logging
 
 from textual.screen import Screen
-from textual.containers import Vertical, Horizontal, Container
-from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, LoadingIndicator
+from textual.containers import Vertical
+from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable
 from textual.binding import Binding
 from textual.message import Message
-from textual.worker import Worker, get_current_worker, WorkerState
+from textual.worker import Worker, WorkerState
 
 from ..widgets.data_table import FilterableDataTable
 import icelib.clients as clients
@@ -203,8 +203,11 @@ class TableDetailScreen(Screen):
             logger.info(f"Loading sample data for table '{self.full_table_name}'")
             sample_data = clients.sample_table_data(catalog_config, self.full_table_name, limit=10)
             
+            if sample_data.get("error") and not sample_data.get("rows"):
+                return {"error": sample_data["error"]}
+
             if not sample_data or not sample_data.get("rows"):
-                return {"columns": ["NO DATA"], "rows": []}
+                return {"columns": ["INFO"], "rows": [{"INFO": "No data found"}]}
             
             columns = sample_data.get("columns", [])
             rows_data = sample_data.get("rows", [])
@@ -355,6 +358,35 @@ class TableDetailScreen(Screen):
             logger.error(f"Branches error traceback: {traceback.format_exc()}")
             return {"error": f"Failed to load branches: {str(e)}"}
     
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Highlight the parent snapshot whenever a snapshot row is selected."""
+        logger.debug(
+            "RowHighlighted: data_table=%r  is_snapshots=%s  cursor_row=%d",
+            event.data_table,
+            event.data_table is self.snapshots_table,
+            event.cursor_row,
+        )
+        if event.data_table is not self.snapshots_table:
+            return
+
+        rows = self.snapshots_table._filtered_rows
+        row_index = event.cursor_row
+        if not rows or row_index >= len(rows):
+            self.snapshots_table.highlight_rows(set())
+            return
+
+        parent_id = rows[row_index].get("PARENT_ID", "—")
+        if parent_id != "—":
+            parent_indices = {
+                i for i, r in enumerate(rows)
+                if r.get("SNAPSHOT_ID") == parent_id
+            }
+            self.snapshots_table.highlight_cells(
+                {(i, "SNAPSHOT_ID") for i in parent_indices}
+            )
+        else:
+            self.snapshots_table.highlight_cells(set())
+
     def action_go_back(self) -> None:
         """Handle going back."""
         self.post_message(self.GoBack())

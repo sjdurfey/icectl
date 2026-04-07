@@ -12,10 +12,10 @@ catalogs:
       profile: null
     sample_engine: { type: local }
     overrides:
-      s3.endpoint: http://10.0.0.166:9090
-      s3.path-style-access: true
+      py-io-impl: pyiceberg.io.fsspec.FsspecFileIO
+      s3.path-style-access: "true"
       s3.region: us-east-1
       s3.access-key-id: rustfsadmin
       s3.secret-access-key: rustfsadmin123
-      rest.ssl-verification: false
-      ssl.verify: false
+      rest.ssl-verification: "false"
+      ssl.verify: "false"

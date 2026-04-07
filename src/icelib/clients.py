@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from .config import Catalog
+
+# Trust homelab CA cert for FsspecFileIO S3 HTTPS connections (botocore/requests).
+# Only set if not already configured externally.
+_HOMELAB_CA = Path.home() / ".homelab-ca.pem"
+if _HOMELAB_CA.exists() and "REQUESTS_CA_BUNDLE" not in os.environ:
+    os.environ["REQUESTS_CA_BUNDLE"] = str(_HOMELAB_CA)
 
 
 def _build_pyiceberg_properties(cat: Catalog) -> Dict[str, object]:
