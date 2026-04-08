@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from botocore.config import Config
 
 # RustFS configuration
-ENDPOINT_URL = "http://10.0.0.166:9090"  # External endpoint
+ENDPOINT_URL = "http://rustfs.homelab:9090"
 ACCESS_KEY = "rustfsadmin"
 SECRET_KEY = "rustfsadmin123"
 REGION = "us-east-1"

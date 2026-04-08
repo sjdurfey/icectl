@@ -8,7 +8,7 @@ from datetime import datetime
 from textual.screen import Screen, ModalScreen
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll, Horizontal
-from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable, Select, Button
+from textual.widgets import Header, Footer, Static, TabbedContent, TabPane, DataTable, Select, Button, TextArea
 from textual.binding import Binding
 from textual.message import Message
 from textual.worker import Worker, WorkerState
@@ -116,6 +116,7 @@ class TableDetailScreen(Screen):
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("l", "load_sample", "Load Sample"),
+        Binding("ctrl+enter", "execute_query", "Execute Query", show=False),
     ]
     
     class GoBack(Message):
@@ -138,6 +139,7 @@ class TableDetailScreen(Screen):
         self._ancestor_map: Dict[str, List[str]] = {} # snapshot_id → [branch names it's on]
         self._snapshots_raw: List[Dict] = []          # raw snapshot dicts (newest-first)
         self.snapshot_graph_widget: Optional[Static] = None
+        self.query_table: Optional[FilterableDataTable] = None
         
     def compose(self):
         """Compose the screen layout."""
@@ -168,7 +170,15 @@ class TableDetailScreen(Screen):
                             yield FilterableDataTable(id="branches-table")
                         with VerticalScroll(id="branches-graph-pane"):
                             yield SnapshotGraph("", id="snapshot-dag", markup=False)
-            
+
+                with TabPane("Query", id="query"):
+                    with Vertical(id="query-pane"):
+                        yield TextArea("", id="query-input", language="sql")
+                        with Horizontal(id="query-controls"):
+                            yield Button("Execute  [Ctrl+Enter]", id="query-execute", variant="primary")
+                            yield Static("", id="query-status")
+                        yield FilterableDataTable(id="query-table")
+
             yield Footer()
     
     def on_mount(self) -> None:
@@ -181,6 +191,13 @@ class TableDetailScreen(Screen):
         self.schema_partition_specs = self.query_one("#schema-partition-specs", FilterableDataTable)
         self.schema_selector = self.query_one("#schema-selector", Select)
         self.snapshot_graph_widget = self.query_one("#snapshot-dag", Static)
+        self.query_table = self.query_one("#query-table", FilterableDataTable)
+
+        # Pre-populate SQL editor with a sensible default
+        query_input = self.query_one("#query-input", TextArea)
+        query_input.load_text(
+            f"SELECT *\nFROM {self.catalog_name}.{self.full_table_name}\nLIMIT 100"
+        )
 
         # Focus the first table by default
         self.schema_table.focus()
@@ -346,6 +363,24 @@ class TableDetailScreen(Screen):
                 else:
                     self.branches_table.set_data(result["columns"], result["rows"])
 
+            elif event.worker.name == "query":
+                status = self.query_one("#query-status", Static)
+                if "error" in result:
+                    status.update(f"[red]{result['error']}[/red]")
+                    self.query_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
+                else:
+                    n = result["row_count"]
+                    elapsed = result.get("elapsed_s", "?")
+                    status.update(f"[green]{n} row{'s' if n != 1 else ''} in {elapsed}s[/green]")
+                    if result["columns"]:
+                        rows = [
+                            {col: str(v) if v is not None else "" for col, v in row.items()}
+                            for row in result["rows"]
+                        ]
+                        self.query_table.set_data(result["columns"], rows)
+                    else:
+                        self.query_table.set_data(["INFO"], [{"INFO": "Query returned no rows"}])
+
             elif event.worker.name.startswith("schema_"):
                 if "error" in result:
                     self.schema_table.set_data(["ERROR"], [{"ERROR": result["error"]}])
@@ -373,6 +408,9 @@ class TableDetailScreen(Screen):
                 self.branches_table.set_data(["ERROR"], [{"ERROR": error_msg}])
             elif event.worker.name == "partition_specs":
                 self.schema_partition_specs.set_data(["ERROR"], [{"ERROR": error_msg}])
+            elif event.worker.name == "query":
+                self.query_one("#query-status", Static).update(f"[red]Error: {error_msg}[/red]")
+                self.query_table.set_data(["ERROR"], [{"ERROR": error_msg}])
 
     def _apply_partition_spec_filter(self, schema_field_ids: set) -> None:
         """Re-render partition specs showing only those compatible with the given field IDs."""
@@ -986,3 +1024,34 @@ class TableDetailScreen(Screen):
         logger.info(f"Loading sample data for table '{self.full_table_name}'")
         self.sample_table.set_data(["LOADING"], [{"LOADING": "Loading sample data..."}])
         self.run_worker(self.load_sample_data_worker, name="sample", thread=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "query-execute":
+            self.action_execute_query()
+        elif event.button.id == "snapshot-modal-close":
+            pass  # handled by SnapshotDetailModal itself
+
+    def action_execute_query(self) -> None:
+        """Execute the SQL in the query editor."""
+        query_input = self.query_one("#query-input", TextArea)
+        query = query_input.text.strip()
+        if not query:
+            return
+        status = self.query_one("#query-status", Static)
+        status.update("[dim]Running…[/dim]")
+        self.query_table.set_data(["LOADING"], [{"LOADING": "Running query..."}])
+        self.run_worker(
+            lambda q=query: self._run_query_worker(q),
+            name="query",
+            thread=True,
+        )
+
+    def _run_query_worker(self, query: str) -> Dict[str, Any]:
+        config = getattr(self.app, "config", None)
+        if not config:
+            return {"error": "App config not yet loaded"}
+        catalog_config = config.catalogs.get(self.catalog_name)
+        if not catalog_config:
+            return {"error": f"Catalog '{self.catalog_name}' not found in config"}
+        logger.info(f"Running DuckDB query for '{self.full_table_name}'")
+        return clients.run_duckdb_query(catalog_config, query)

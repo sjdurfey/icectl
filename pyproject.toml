@@ -15,6 +15,7 @@ dependencies = [
   "pyarrow>=21.0.0",
   "s3fs>=2025.7.0",
   "textual>=5.3.0",
+  "duckdb>=1.1",
 ]
 
 [project.scripts]

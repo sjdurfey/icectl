@@ -265,6 +265,96 @@ def sample_table_data(cat: Catalog, table_name: str, limit: int = 10) -> Dict[st
         }
 
 
+def run_duckdb_query(cat: Catalog, query: str) -> Dict[str, Any]:
+    """Execute a SQL query against the Iceberg catalog using DuckDB's Iceberg extension.
+
+    Builds a DuckDB connection, installs/loads the iceberg extension, creates an S3
+    secret from the catalog's filesystem config, ATTACHes the REST catalog, then runs
+    the provided query.  Returns a dict with keys:
+      - columns: list of column name strings
+      - rows: list of dicts (column → value)
+      - row_count: int
+    or on error:
+      - error: str
+    """
+    import time
+
+    try:
+        import duckdb
+    except ImportError:
+        return {"error": "duckdb is not installed — run: uv add duckdb"}
+
+    try:
+        t0 = time.monotonic()
+        con = duckdb.connect()
+
+        con.execute("INSTALL iceberg; LOAD iceberg;")
+
+        # Build S3 secret from catalog overrides / fs config
+        access_key = cat.overrides.get("s3.access-key-id", "")
+        secret_key = cat.overrides.get("s3.secret-access-key", "")
+        endpoint = (cat.fs.endpoint_url or "").rstrip("/")
+        # Strip scheme for DuckDB ENDPOINT parameter
+        if endpoint.startswith("http://"):
+            endpoint_host = endpoint[len("http://"):]
+            use_ssl = "false"
+        elif endpoint.startswith("https://"):
+            endpoint_host = endpoint[len("https://"):]
+            use_ssl = "true"
+        else:
+            endpoint_host = endpoint
+            use_ssl = "false"
+
+        region = cat.fs.region or "us-east-1"
+
+        if access_key:
+            con.execute(f"""
+                CREATE OR REPLACE SECRET _icetui_s3 (
+                    TYPE S3,
+                    KEY_ID '{access_key}',
+                    SECRET '{secret_key}',
+                    REGION '{region}',
+                    ENDPOINT '{endpoint_host}',
+                    URL_STYLE 'path',
+                    USE_SSL {use_ssl}
+                );
+            """)
+
+        # ATTACH the REST catalog
+        catalog_uri = cat.uri or ""
+        warehouse = cat.warehouse or ""
+        safe_name = cat.name.replace("-", "_")
+        con.execute(f"""
+            CREATE OR REPLACE SECRET _icetui_catalog (
+                TYPE ICEBERG,
+                AUTHORIZATION_TYPE 'none'
+            );
+        """)
+        con.execute(f"""
+            ATTACH '{warehouse}' AS {safe_name} (
+                TYPE ICEBERG,
+                ENDPOINT '{catalog_uri}',
+                SECRET _icetui_catalog
+            );
+        """)
+
+        rel = con.execute(query)
+        columns = [desc[0] for desc in rel.description]
+        raw_rows = rel.fetchall()
+        rows = [dict(zip(columns, row)) for row in raw_rows]
+        elapsed = time.monotonic() - t0
+
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "elapsed_s": round(elapsed, 3),
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def get_catalogs_client(config: Any) -> Any:
     """Create a catalogs client from config.
     
